@@ -14,8 +14,9 @@ line or frame is skipped and counted, never raised.
 from __future__ import annotations
 
 import contextlib
+import heapq
 import json
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -106,24 +107,32 @@ def iter_raw(
 ) -> Iterator[RawMessage]:
     """Yield raw messages from one ``.jsonl.zst`` file or a raw tree.
 
-    Files are read fully, then messages are yielded in canonical order
-    ``(recv_ts_ns, connection_id, ingest_seq)`` across all of them. A
-    truncated final line or frame is skipped and counted in ``stats`` instead
-    of raised. Pass a :class:`RawReadStats` instance to observe counters.
+    The reader is a streaming k-way merge: each file is decoded and sorted on
+    ``(recv_ts_ns, connection_id, ingest_seq)`` as it is opened, and the
+    per-file iterators are merged with :func:`heapq.merge` in the same sorted
+    file order. The result is identical to materializing every message and
+    sorting the concatenation, because the per-file sorts and the merge are
+    both stable. Files are small hourly rotations, so one file's messages fit
+    comfortably in memory. A truncated final line or frame is skipped and
+    counted in ``stats`` instead of raised. Pass a :class:`RawReadStats`
+    instance to observe counters; ``stats.files`` counts files as they are
+    opened and ``stats.messages`` counts messages as they are yielded.
     """
     stats = RawReadStats() if stats is None else stats
     path = Path(path_or_dir)
     if not path.exists():
         raise FileNotFoundError(path)
     files = [path] if path.is_file() else sorted(path.rglob("*.jsonl.zst"))
-    messages: list[RawMessage] = []
-    for file_path in files:
-        stats.files += 1
-        messages.extend(_iter_file(file_path, stats))
-    messages.sort(key=_sort_key)
-    for message in messages:
+    streams = (_sorted_file(file_path, stats) for file_path in files)
+    for message in heapq.merge(*streams, key=_sort_key):
         stats.messages += 1
         yield message
+
+
+def _sorted_file(path: Path, stats: RawReadStats) -> Iterable[RawMessage]:
+    """Decode one file and return its messages sorted by the canonical key."""
+    stats.files += 1
+    return sorted(_iter_file(path, stats), key=_sort_key)
 
 
 def _iter_file(path: Path, stats: RawReadStats) -> Iterator[RawMessage]:
