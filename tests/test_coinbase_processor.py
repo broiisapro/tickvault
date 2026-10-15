@@ -111,7 +111,9 @@ def test_recorded_fixture_is_clean_and_every_update_level_is_emitted(
 
     # The book is LIVE after the snapshot: every update level is applied and
     # emitted verbatim, in venue order, with the message's sequence.
-    assert _deltas(outputs) == _expected_deltas(messages)
+    emitted = _deltas(outputs)
+    assert emitted == _expected_deltas(messages)
+    assert len(emitted) > 0
     assert len(_trades(outputs)) > 0
 
 
@@ -132,6 +134,7 @@ def test_recorded_fixture_samples_cover_every_exchange_second(
         for update in message.book_updates
     }
     sample_seconds = {rows[0].exchange_ts_ns // 1_000_000_000 for rows in groups.values()}
+    assert len(book_seconds) > 0
     assert sample_seconds == book_seconds
     assert sorted(sample_seconds) == list(range(min(sample_seconds), max(sample_seconds) + 1))
 
