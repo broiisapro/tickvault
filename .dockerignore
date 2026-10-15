@@ -5,6 +5,7 @@
 .venv
 data
 reports
+site
 .worktrees
 .orchestration
 .env

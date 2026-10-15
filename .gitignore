@@ -3,9 +3,12 @@
 .worktrees/
 # Secrets
 .env
+.streamlit/secrets.toml
 # Local data
 data/
 .DS_Store
+# GitHub Pages build output (scripts/build_qa_site.py)
+site/
 
 # Python / uv
 .venv/
