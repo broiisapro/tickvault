@@ -16,20 +16,16 @@ def _plain(text: str) -> str:
 COMMANDS = ["ingest", "replay", "qa", "compact", "sql", "reconcile", "bench"]
 
 STUB_INVOCATIONS = [
-    ["qa", "--data", "data"],
-    ["compact", "--data", "data", "--date", "2026-10-01"],
-    ["sql", "--data", "data"],
-    ["reconcile", "--tardis-date", "2026-10-01", "--venue", "coinbase", "--symbol", "BTC-USD"],
     ["bench", "--input", "data/raw"],
 ]
 
 COMMAND_OPTIONS = {
     "ingest": ["--venues", "--symbols", "--duration", "--out", "--max-gb"],
     "replay": ["--input", "--out"],
-    "qa": ["--data", "--date"],
+    "qa": ["--data", "--date", "--json", "--reports"],
     "compact": ["--data", "--date"],
     "sql": ["--data", "-c"],
-    "reconcile": ["--tardis-date", "--venue", "--symbol", "--fixture", "--data"],
+    "reconcile": ["--tardis-date", "--venue", "--symbol", "--fixture", "--data", "--json"],
     "bench": ["--input"],
 }
 
@@ -61,8 +57,6 @@ def test_command_stubs_exit_2(args: list[str]) -> None:
 @pytest.mark.parametrize("command", COMMANDS)
 def test_missing_required_options_exit_2(command: str) -> None:
     result = runner.invoke(app, [command])
-    if command in ("reconcile", "bench"):
-        assert result.exit_code == 2
+    assert result.exit_code == 2
+    if command == "bench":
         assert "not implemented yet" in result.stderr
-    else:
-        assert result.exit_code == 2
