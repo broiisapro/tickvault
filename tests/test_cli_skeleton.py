@@ -16,8 +16,6 @@ def _plain(text: str) -> str:
 COMMANDS = ["ingest", "replay", "qa", "compact", "sql", "reconcile", "bench"]
 
 STUB_INVOCATIONS = [
-    ["ingest", "--venues", "coinbase", "--symbols", "BTC-USD", "--out", "data"],
-    ["replay", "--input", "data/raw", "--out", "out"],
     ["qa", "--data", "data"],
     ["compact", "--data", "data", "--date", "2026-10-01"],
     ["sql", "--data", "data"],
