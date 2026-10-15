@@ -12,9 +12,13 @@ like replay. It merges the connector streams through an
 :class:`asyncio.Queue`, routes every :class:`ResyncRequest` back to its venue's
 connector, flushes idle Parquet buffers once per second, and stops gracefully
 on ``duration``, on ``stop_event``, on SIGTERM/SIGINT, or when the data root
-grows past ``max_gb``. A graceful stop closes the connectors, waits for their
-streams to end, processes the remaining queued messages, and closes the raw
-and Parquet writers, so every file on disk is complete and readable.
+grows past ``max_gb`` (measured from the writers' byte counters plus the data
+root's size once at start-up, never by walking the tree). It logs a start
+line, one progress line every ``progress_interval`` seconds and a final
+summary through the ``tickvault.pipeline`` logger; the library never
+configures logging itself. A graceful stop closes the connectors, waits for
+their streams to end, processes the remaining queued messages, and closes the
+raw and Parquet writers, so every file on disk is complete and readable.
 
 Both entry points return the same frozen :class:`PipelineStats`.
 """
@@ -24,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +52,9 @@ _LIVE_IDLE_FLUSH_S = 60.0
 
 _LIVE_TICK_S = 1.0
 """Idle-flush and ``--max-gb`` check interval of the live loop."""
+
+_LIVE_PROGRESS_S = 10.0
+"""Default seconds between ``ingest progress`` log lines; 0 disables them."""
 
 _NORMALIZERS: dict[str, Callable[[RawMessage], NormalizedMessage]] = {
     "coinbase": coinbase_normalize.normalize,
@@ -135,6 +143,7 @@ class _Recorder:
         self.processor = processor
         self.writer = writer
         self.raw_lines = 0
+        self.raw_by_venue: dict[str, int] = {}
         self.messages = 0
         self.normalize_errors = 0
         self.trades = 0
@@ -148,6 +157,11 @@ class _Recorder:
         self.disconnects = 0
         self.resync_requests = 0
 
+    @property
+    def anomalies(self) -> int:
+        """Gap, checksum and invariant failures seen so far."""
+        return self.gaps + self.checksum_failures + self.invariant_violations
+
     def process(self, message: RawMessage) -> list[ResyncRequest]:
         """Record one raw message and return the resync requests it produced.
 
@@ -157,6 +171,7 @@ class _Recorder:
         :class:`ValueError`.
         """
         self.raw_lines += 1
+        self.raw_by_venue[message.venue] = self.raw_by_venue.get(message.venue, 0) + 1
         normalize = _NORMALIZERS.get(message.venue)
         if normalize is None:
             raise ValueError(f"no normalizer for venue {message.venue!r}")
@@ -256,6 +271,7 @@ async def run_live(
     max_gb: float | None = None,
     connector_factories: Mapping[str, ConnectorFactory] | None = None,
     stop_event: asyncio.Event | None = None,
+    progress_interval: float = _LIVE_PROGRESS_S,
 ) -> PipelineStats:
     """Stream live venue data into the raw and normalized layers under ``out``.
 
@@ -265,8 +281,18 @@ async def run_live(
     gracefully on ``duration`` seconds, on ``stop_event``, on SIGTERM/SIGINT,
     or when the data root exceeds ``max_gb``; the returned stats'
     ``stopped_by`` records which happened.
+
+    Logging goes through the ``tickvault.pipeline`` logger: a start line, one
+    ``ingest progress`` line every ``progress_interval`` seconds (0 disables
+    the periodic lines), and a final summary. The library never configures
+    logging itself; the CLI does. ``max_gb`` is enforced from the writers'
+    ``bytes_written`` counters plus the data root's size measured once at
+    start-up, so no directory walk happens while the run is live.
     """
+    if progress_interval < 0:
+        raise ValueError("progress_interval must be non-negative")
     out_path = Path(out)
+    initial_bytes = _tree_bytes(out_path)
     factories = (
         default_connector_factories() if connector_factories is None else connector_factories
     )
@@ -285,8 +311,26 @@ async def run_live(
     recorder = _Recorder(BookProcessor(), parquet)
     queue: asyncio.Queue[tuple[Connector, RawMessage | None]] = asyncio.Queue()
     producers = [asyncio.create_task(_pump(connector, queue)) for connector in connectors]
-    ticker = asyncio.create_task(_tick(parquet, stopper, out_path, max_gb))
+    started = time.monotonic()
+    _LOGGER.info(
+        "ingest starting: venues=%s symbols=%s out=%s",
+        ",".join(venues),
+        ",".join(symbols),
+        out_path,
+    )
+    ticker = asyncio.create_task(
+        _tick(parquet, raw_writer, stopper, out_path, initial_bytes, max_gb)
+    )
     timer = asyncio.create_task(_stop_after(duration, stopper)) if duration is not None else None
+    progress = (
+        asyncio.create_task(
+            _report_progress(
+                recorder, raw_writer, parquet, venues, progress_interval, started
+            )
+        )
+        if progress_interval > 0
+        else None
+    )
     loop = asyncio.get_running_loop()
     handled_signals = _install_signal_handlers(loop, stopper)
     finished = 0
@@ -311,18 +355,24 @@ async def run_live(
     finally:
         for signum in handled_signals:
             loop.remove_signal_handler(signum)
-        for task in (ticker, timer):
-            if task is not None:
-                task.cancel()
-        pending = [task for task in (ticker, timer) if task is not None]
-        await asyncio.gather(*pending, return_exceptions=True)
+        background = [task for task in (ticker, timer, progress) if task is not None]
+        for task in background:
+            task.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
         await _close_connectors(connectors)
         await asyncio.gather(*producers, return_exceptions=True)
         while not queue.empty():
             queue.get_nowait()
         raw_writer.close()
         parquet.close()
-    return recorder.stats("live", stopper.reason if stopper.reason is not None else "completed")
+    stats = recorder.stats("live", stopper.reason if stopper.reason is not None else "completed")
+    _LOGGER.info(
+        "ingest finished: stopped=%s elapsed=%.0fs %s",
+        stats.stopped_by,
+        time.monotonic() - started,
+        _progress_fields(recorder, raw_writer, parquet, venues),
+    )
+    return stats
 
 
 async def _pump(
@@ -370,16 +420,72 @@ async def _stop_after(seconds: float, stopper: _Stopper) -> None:
     stopper.request("duration")
 
 
-async def _tick(
-    parquet: ParquetWriter, stopper: _Stopper, out: Path, max_gb: float | None
+async def _report_progress(
+    recorder: _Recorder,
+    raw_writer: RawWriter,
+    parquet: ParquetWriter,
+    venues: Sequence[str],
+    interval: float,
+    started: float,
 ) -> None:
-    """Flush idle Parquet buffers and enforce ``max_gb`` once per second."""
+    """Log one ``ingest progress`` line every ``interval`` seconds.
+
+    The schedule is anchored to ``started`` so a slow loop never produces two
+    lines for one interval; ticks missed while the loop was blocked are
+    skipped. Counters are read when the line is written.
+    """
+    loop = asyncio.get_running_loop()
+    schedule = started + interval
+    while True:
+        now = loop.time()
+        if schedule > now:
+            await asyncio.sleep(schedule - now)
+        _LOGGER.info(
+            "ingest progress: elapsed=%.0fs %s",
+            time.monotonic() - started,
+            _progress_fields(recorder, raw_writer, parquet, venues),
+        )
+        now = loop.time()
+        schedule = max(schedule + interval, now + interval)
+
+
+def _progress_fields(
+    recorder: _Recorder,
+    raw_writer: RawWriter,
+    parquet: ParquetWriter,
+    venues: Sequence[str],
+) -> str:
+    """Render the shared counter section of the progress and summary lines."""
+    by_venue = " ".join(f"{venue}={recorder.raw_by_venue.get(venue, 0)}" for venue in venues)
+    written_mb = (raw_writer.bytes_written + parquet.bytes_written) / 1_000_000
+    return (
+        f"raw_msgs={recorder.raw_lines} ({by_venue}) "
+        f"trades={recorder.trades} book_deltas={recorder.book_deltas} "
+        f"anomalies={recorder.anomalies} resyncs={recorder.resyncs} "
+        f"written={written_mb:.1f}MB"
+    )
+
+
+async def _tick(
+    parquet: ParquetWriter,
+    raw_writer: RawWriter,
+    stopper: _Stopper,
+    out: Path,
+    initial_bytes: int,
+    max_gb: float | None,
+) -> None:
+    """Flush idle Parquet buffers and enforce ``max_gb`` once per second.
+
+    The size check adds the writers' monotonic byte counters to the data
+    root's size measured once at start-up, so it never walks the tree while
+    the run is live. Stop behaviour of ``run_live`` is unchanged.
+    """
     while True:
         await asyncio.sleep(_LIVE_TICK_S)
         parquet.flush_idle()
         if max_gb is None:
             continue
-        size_bytes = _tree_bytes(out)
+        size_bytes = initial_bytes + raw_writer.bytes_written + parquet.bytes_written
         limit_bytes = max_gb * 1_000_000_000
         if size_bytes > limit_bytes:
             _LOGGER.warning(
