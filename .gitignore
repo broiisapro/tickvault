@@ -1,0 +1,8 @@
+# Orchestration and agent worktrees: never committed
+.orchestration/
+.worktrees/
+# Secrets
+.env
+# Local data
+data/
+.DS_Store
