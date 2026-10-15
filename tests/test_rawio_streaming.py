@@ -321,3 +321,39 @@ def test_fallback_spills_bounded_runs_and_removes_temporaries(
     assert next(stream) == expected[0]
     stream.close()
     assert list(temp_root.iterdir()) == []
+
+
+def test_early_close_releases_fallback_temporaries_on_multi_file_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Cleanup must not depend on the garbage collector: on CPython 3.12.3 the
+    # abandoned per-file generators are not finalized when the consumer closes
+    # the outer iterator, so iter_raw has to close them itself.
+    monkeypatch.setattr(rawio, "_SORT_RUN_LINES", 4)
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
+
+    root = tmp_path / "raw"
+    _write_raw(
+        root / "a-ordered.jsonl.zst",
+        [
+            _raw(connection_id="kraken-a", ingest_seq=index, recv_ts_ns=100 + index)
+            for index in range(6)
+        ],
+    )
+    _write_raw(
+        root / "b-unordered.jsonl.zst",
+        [
+            _raw(connection_id="kraken-b", ingest_seq=index, recv_ts_ns=value)
+            for index, value in enumerate([5, 1, 4, 0, 3, 2])
+        ],
+    )
+
+    stream = iter_raw(root)
+    next(stream)
+    # heapq.merge primes every per-file stream on the first next(), so the
+    # unordered file has already spilled its runs into a temporary directory.
+    assert list(temp_root.iterdir()) != []
+    stream.close()
+    assert list(temp_root.iterdir()) == []
