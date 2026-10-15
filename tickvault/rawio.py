@@ -16,7 +16,8 @@ from __future__ import annotations
 import contextlib
 import heapq
 import json
-from collections.abc import Iterable, Iterator
+import tempfile
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,9 @@ import zstandard as zstd
 from tickvault.models import RawKind, RawMessage
 
 _READ_CHUNK = 1 << 20
+
+_SORT_RUN_LINES = 65_536
+"""Messages held in memory per external-sort run before the run is spilled."""
 
 
 @dataclass
@@ -107,16 +111,20 @@ def iter_raw(
 ) -> Iterator[RawMessage]:
     """Yield raw messages from one ``.jsonl.zst`` file or a raw tree.
 
-    The reader is a streaming k-way merge: each file is decoded and sorted on
-    ``(recv_ts_ns, connection_id, ingest_seq)`` as it is opened, and the
-    per-file iterators are merged with :func:`heapq.merge` in the same sorted
-    file order. The result is identical to materializing every message and
-    sorting the concatenation, because the per-file sorts and the merge are
-    both stable. Files are small hourly rotations, so one file's messages fit
-    comfortably in memory. A truncated final line or frame is skipped and
-    counted in ``stats`` instead of raised. Pass a :class:`RawReadStats`
-    instance to observe counters; ``stats.files`` counts files as they are
-    opened and ``stats.messages`` counts messages as they are yielded.
+    The reader is a streaming k-way merge: every file is decoded lazily by its
+    own iterator, in the same sorted file order, and merged with
+    :func:`heapq.merge`. Memory stays bounded by the number of files and one
+    decode chunk, never by a file's size. A file whose lines arrive in
+    canonical order ``(recv_ts_ns, connection_id, ingest_seq)`` (the normal
+    case: one writer appends one connection's messages in order) is streamed
+    straight out; a file containing an out-of-order line is sorted first with
+    a bounded-memory external sort. Both per-file paths preserve the original
+    order of equal keys, so the result is identical to materializing every
+    message and stable-sorting the concatenation. A truncated final line or
+    frame is skipped and counted in ``stats`` instead of raised. Pass a
+    :class:`RawReadStats` instance to observe counters; ``stats.files`` counts
+    files as they are opened and ``stats.messages`` counts messages as they
+    are yielded.
     """
     stats = RawReadStats() if stats is None else stats
     path = Path(path_or_dir)
@@ -129,10 +137,91 @@ def iter_raw(
         yield message
 
 
-def _sorted_file(path: Path, stats: RawReadStats) -> Iterable[RawMessage]:
-    """Decode one file and return its messages sorted by the canonical key."""
+def _sorted_file(path: Path, stats: RawReadStats) -> Iterator[RawMessage]:
+    """Yield one file's messages in canonical order with bounded memory.
+
+    Whether the file is ordered has to be known before its first message is
+    handed out — a message yielded early cannot be recalled when a later line
+    turns out to be out of order — so the file is scanned first, keeping only
+    the previous key. Ordered files are then streamed in a second pass that
+    buffers nothing beyond the decode chunk; unordered files go through the
+    bounded-memory external-sort fallback. ``stats`` is updated by the pass
+    that yields messages, so every counter is incremented exactly once.
+    """
     stats.files += 1
-    return sorted(_iter_file(path, stats), key=_sort_key)
+    if _file_is_ordered(path):
+        yield from _iter_file(path, stats)
+    else:
+        yield from _sorted_file_via_runs(path, stats)
+
+
+def _file_is_ordered(path: Path) -> bool:
+    """True when every decodable line of ``path`` is in canonical key order.
+
+    Stops at the first inversion. Malformed lines are ignored because they
+    never reach the output, and a truncated tail is tolerated exactly like
+    :func:`_iter_file`. The scan uses throwaway statistics so the real
+    counters are only incremented by the pass that yields messages.
+    """
+    previous: tuple[int, str, int] | None = None
+    for message in _iter_file(path, RawReadStats()):
+        key = _sort_key(message)
+        if previous is not None and key < previous:
+            return False
+        previous = key
+    return True
+
+
+def _sorted_file_via_runs(path: Path, stats: RawReadStats) -> Iterator[RawMessage]:
+    """Sort ``path`` exactly: spill stable sorted runs, then merge them.
+
+    The file is decoded once, in file order. Runs of at most
+    ``_SORT_RUN_LINES`` messages are sorted stably and written to a temporary
+    directory; :func:`heapq.merge` over the runs in spill order keeps equal
+    keys in their original relative order, exactly like a single stable sort.
+    The temporaries are removed when the iterator is exhausted or closed
+    early. Decoding happens while the runs are built, so ``stats`` is
+    incremented exactly once per file.
+    """
+    with tempfile.TemporaryDirectory(prefix="tickvault-rawio-") as directory:
+        runs = _write_sorted_runs(path, stats, Path(directory))
+        streams = [_iter_run(run_path) for run_path in runs]
+        try:
+            yield from heapq.merge(*streams, key=_sort_key)
+        finally:
+            for stream in streams:
+                stream.close()
+
+
+def _write_sorted_runs(path: Path, stats: RawReadStats, directory: Path) -> list[Path]:
+    """Decode ``path`` once and spill its messages as stable sorted run files."""
+    runs: list[Path] = []
+    buffer: list[RawMessage] = []
+    for message in _iter_file(path, stats):
+        buffer.append(message)
+        if len(buffer) >= _SORT_RUN_LINES:
+            runs.append(_spill_run(directory, len(runs), buffer))
+            buffer = []
+    if buffer:
+        runs.append(_spill_run(directory, len(runs), buffer))
+    return runs
+
+
+def _spill_run(directory: Path, index: int, messages: list[RawMessage]) -> Path:
+    """Sort ``messages`` stably in place and write them as one run file."""
+    messages.sort(key=_sort_key)
+    run_path = directory / f"run-{index:06d}.jsonl"
+    with run_path.open("wb") as handle:
+        for message in messages:
+            handle.write(encode_line(message))
+    return run_path
+
+
+def _iter_run(run_path: Path) -> Generator[RawMessage, None, None]:
+    """Yield the messages of one spilled run file in its stored order."""
+    with run_path.open("rb") as handle:
+        for line in handle:
+            yield decode_line(line.rstrip(b"\n"))
 
 
 def _iter_file(path: Path, stats: RawReadStats) -> Iterator[RawMessage]:
