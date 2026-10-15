@@ -15,7 +15,9 @@ receive time (Kraken is offset +50 ms so no receive timestamps tie):
 
 ``tests/fixtures/synthetic_gap_session.expected.json`` records the exact
 counts and event order that a ``BookProcessor`` is expected to produce from
-the session. ``--check`` regenerates both outputs in memory, self-tests the
+the session, keyed by the normalized symbol (``BASE-QUOTE``) while the raw
+payloads keep the venue spellings. ``--check`` regenerates both outputs in
+memory, self-tests the
 checksum implementation against Kraken's documented vector and the live
 vector captured on 2026-10-15, and exits non-zero unless the committed files
 are byte-identical to the regenerated ones.
@@ -89,11 +91,14 @@ KRAKEN_COUNTS = {
 }
 
 EXPECTED_NOTES = [
+    "symbols are normalized to BASE-QUOTE after the normalizer: venue counts and "
+    "events are keyed by the normalized symbol (the raw Kraken payloads keep the "
+    "venue's BTC/USD, which appears here as BTC-USD).",
     "book_deltas_applied counts price levels committed to the live book; "
     "book_deltas_dropped counts levels in updates discarded while SYNCING.",
-    "the Coinbase update that exposes the sequence gap and the Kraken update whose "
-    "checksum fails are validated and discarded, so their levels are counted as "
-    "neither applied nor dropped.",
+    "anomaly-message accounting: the Coinbase update that exposes the sequence gap "
+    "and the Kraken update whose checksum fails are validated and discarded, so "
+    "their levels are counted as neither applied nor dropped.",
     "trades counts emitted trade rows from market_trades/trade update messages; "
     "trade snapshot backfills are not emitted.",
     "expected_seq/received_seq are null except for gap events.",
@@ -737,7 +742,7 @@ def build_expected() -> bytes:
         "base_time": "2026-11-01T00:00:00Z",
         "counts": {
             "coinbase": {"BTC-USD": COINBASE_COUNTS},
-            "kraken": {"BTC/USD": KRAKEN_COUNTS},
+            "kraken": {"BTC-USD": KRAKEN_COUNTS},
         },
         "events": [
             {
@@ -761,7 +766,7 @@ def build_expected() -> bytes:
             {
                 "event_type": "checksum_failure",
                 "venue": "kraken",
-                "symbol": "BTC/USD",
+                "symbol": "BTC-USD",
                 "connection_id": KRAKEN_CONNECTION_ID,
                 "ingest_seq": 35,
                 "expected_seq": None,
@@ -770,7 +775,7 @@ def build_expected() -> bytes:
             {
                 "event_type": "resync",
                 "venue": "kraken",
-                "symbol": "BTC/USD",
+                "symbol": "BTC-USD",
                 "connection_id": KRAKEN_CONNECTION_ID,
                 "ingest_seq": 39,
                 "expected_seq": None,

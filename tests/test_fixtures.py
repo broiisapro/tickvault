@@ -123,10 +123,10 @@ def test_synthetic_expected_anomalies(
     counts = synthetic_expected["counts"]
     assert counts["coinbase"]["BTC-USD"]["gaps"] == 1
     assert counts["coinbase"]["BTC-USD"]["resyncs"] == 1
-    assert counts["kraken"]["BTC/USD"]["checksum_failures"] == 1
-    assert counts["kraken"]["BTC/USD"]["resyncs"] == 1
+    assert counts["kraken"]["BTC-USD"]["checksum_failures"] == 1
+    assert counts["kraken"]["BTC-USD"]["resyncs"] == 1
     assert counts["coinbase"]["BTC-USD"]["unexplained"] == 0
-    assert counts["kraken"]["BTC/USD"]["unexplained"] == 0
+    assert counts["kraken"]["BTC-USD"]["unexplained"] == 0
 
     sequences = []
     for record in raw_lines(synthetic_gap_path):
