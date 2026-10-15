@@ -14,7 +14,7 @@ here; Epic 2 adds it when a raw tree is present (decision A24).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date as Date
 from pathlib import Path
 
@@ -77,7 +77,6 @@ class _Partial:
     lag_p99_ms: float = 0.0
     coverage: float = 0.0
     unexplained: int = 0
-    pending_anomalies: list[EventOrder] = field(default_factory=list)
 
 
 def _normalize_date(value: str | Date | None) -> str | None:
