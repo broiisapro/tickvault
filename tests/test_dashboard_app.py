@@ -3,11 +3,14 @@
 The tests point ``TICKVAULT_DATA_DIR`` at a root built from the tiny synthetic
 fixture (replaying the five-minute recordings would only slow the AppTest
 down), render the app once and assert it completes without exceptions and
-produces the expected elements. Nothing here touches the network.
+produces the expected elements. The header tests render the committed
+``dashboard/sample`` with ``TICKVAULT_DATA_DIR`` unset, which also exercises
+the cold-render budget on the real sample. Nothing here touches the network.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -21,6 +24,8 @@ from tickvault.normalize import kraken as kraken_normalizer
 from tickvault.rawio import iter_raw
 from tickvault.storage.parquet_writer import ParquetWriter
 
+_TITLE = "TickVault — crypto market-data quality"
+_SOURCE_URL = "https://github.com/broiisapro/tickvault"
 _APP_PATH = Path(__file__).resolve().parents[1] / "dashboard" / "app.py"
 _NORMALIZERS = {"coinbase": coinbase_normalizer.normalize, "kraken": kraken_normalizer.normalize}
 
@@ -69,6 +74,51 @@ def _render(monkeypatch: pytest.MonkeyPatch, root: Path) -> AppTest:
     app = AppTest.from_file(str(_APP_PATH), default_timeout=60)
     app.run()
     return app
+
+
+def _render_bundled_sample(monkeypatch: pytest.MonkeyPatch) -> AppTest:
+    monkeypatch.delenv("TICKVAULT_DATA_DIR", raising=False)
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=30)
+    app.run(timeout=30)
+    return app
+
+
+def test_app_header_describes_the_bundled_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _render_bundled_sample(monkeypatch)
+    assert app.exception == []
+    assert [title.value for title in app.title] == [_TITLE]
+    assert any(_SOURCE_URL in block.value for block in app.markdown)
+    root_captions = [
+        caption.value for caption in app.caption if caption.value.startswith("Bundled sample:")
+    ]
+    assert len(root_captions) == 1
+    caption = root_captions[0]
+    for market in ("coinbase", "kraken", "BTC-USD", "ETH-USD"):
+        assert market in caption
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", caption) is not None
+    assert re.search(r"UTC \(\d+ min\)", caption) is not None
+    tiles = {tile.label: tile.value for tile in app.metric}
+    assert "Messages/s (last 5 min)" in tiles
+    assert float(tiles["Messages/s (last 5 min)"].replace(",", "")) > 0
+
+
+def test_app_header_shows_the_live_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _render(monkeypatch, tmp_path)
+    assert app.exception == []
+    live = [
+        caption.value
+        for caption in app.caption
+        if caption.value.startswith("Live data root:")
+    ]
+    assert len(live) == 1
+    assert str(tmp_path) in live[0]
+    assert not any(
+        caption.value.startswith("Bundled sample:") for caption in app.caption
+    )
 
 
 def test_app_renders_with_data(

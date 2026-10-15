@@ -23,7 +23,8 @@ Row caps
 ``DEFAULT_SERIES_ROWS`` (3000) is the default ``limit``: at most that many
 newest points per series, where a series is one venue (message rate) or one
 venue/symbol pair (top of book, spread, mid). QA history is one row per
-venue/symbol/day and needs no cap.
+venue/symbol/day; :func:`dimensions` is one row per market and
+:func:`data_span` is always one row, so none of them needs a cap.
 
 QA cache
 --------
@@ -114,8 +115,9 @@ def cumulative_event_counts(
     """Event counts per venue accumulated over the whole data root.
 
     Every ``events`` row counts once, keyed by its ``event_type``
-    (``gap``, ``checksum_failure``, ``reconnect`` and the rest). Columns:
-    ``venue``, ``event_type``, ``count``.
+    (``gap``, ``checksum_failure``, ``reconnect`` and the rest). At most one
+    row per ``(venue, event_type)`` present, so at most six rows per venue.
+    Columns: ``venue``, ``event_type``, ``count``.
     """
     venue_filter = _venue_filter(venues)
     sql = f"""
@@ -155,9 +157,9 @@ def qa_history(root: str | Path, *, dates: Sequence[str | Date] | None = None) -
 
     Runs :func:`tickvault.qa.metrics.compute_qa` once per date (all partition
     dates by default, newest last) and concatenates the rows; results are
-    cached for ``QA_CACHE_TTL_S`` seconds. Columns are the :class:`QARow`
-    fields; the frame is empty (with those columns) when ``root`` has no
-    normalized data.
+    cached for ``QA_CACHE_TTL_S`` seconds. At most one row per
+    ``(venue, symbol, date)``. Columns are the :class:`QARow` fields; the
+    frame is empty (with those columns) when ``root`` has no normalized data.
     """
     root_text = str(root)
     selected = qa_dates(root) if dates is None else [_iso_date(day) for day in dates]
@@ -236,11 +238,36 @@ def spread_mid(
     return frame[["venue", "symbol", "ts", "mid", "spread_bps"]]
 
 
+def data_span(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """First and last exchange timestamp over the whole data root.
+
+    Unions the ``exchange_ts_ns`` values of ``trades``, ``book_deltas``,
+    ``book_snapshots`` and the non-null ``events`` ones and returns exactly
+    one row with ``first_ts_ns`` and ``last_ts_ns`` (int64 epoch nanoseconds,
+    null when no table holds a timestamp). Feeds the dashboard's data-root
+    caption.
+    """
+    sql = """
+        WITH stamps AS (
+            SELECT exchange_ts_ns FROM trades
+            UNION ALL
+            SELECT exchange_ts_ns FROM book_deltas
+            UNION ALL
+            SELECT exchange_ts_ns FROM book_snapshots
+            UNION ALL
+            SELECT exchange_ts_ns FROM events WHERE exchange_ts_ns IS NOT NULL
+        )
+        SELECT min(exchange_ts_ns) AS first_ts_ns, max(exchange_ts_ns) AS last_ts_ns
+        FROM stamps
+    """
+    return con.execute(sql).df()
+
+
 def dimensions(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     """Distinct ``(venue, symbol)`` pairs present in any normalized table.
 
-    Feeds the dashboard's venue and symbol selectors. Columns: ``venue``,
-    ``symbol``.
+    Feeds the dashboard's venue and symbol selectors. At most one row per
+    ``(venue, symbol)`` pair in the root. Columns: ``venue``, ``symbol``.
     """
     sql = """
         SELECT venue, symbol FROM book_snapshots WHERE source = 'sample' AND level = 0
