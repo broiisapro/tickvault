@@ -1,21 +1,31 @@
-"""Streaming-reader equivalence: old materialize+sort vs the k-way merge (issue #51).
+"""Streaming-reader equivalence and bounded memory (issues #51, #77).
 
 The reference reader below is a verbatim copy of the pre-#51 implementation:
 read every file into a list, then stable-sort the concatenation by
 ``(recv_ts_ns, connection_id, ingest_seq)``. The streaming reader must produce
 the same messages, the same order and the same :class:`RawReadStats` on every
-committed fixture and on a multi-file tree with deliberate ties.
+committed fixture, on a multi-file tree with deliberate ties, and on shuffled
+line orders that force the external-sort fallback. In-order files must stream
+with memory that does not grow with the number of lines, and the fallback must
+clean up its temporary run files even when the consumer stops early.
 """
 
 from __future__ import annotations
 
 import contextlib
+import gc
+import random
+import tempfile
+import tracemalloc
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
 import zstandard as zstd
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
+from tickvault import rawio
 from tickvault.models import RawMessage
 from tickvault.rawio import RawReadStats, decode_line, encode_line, iter_raw
 
@@ -184,3 +194,130 @@ def test_streaming_reader_counts_truncated_tail_like_the_reference(tmp_path: Pat
 def test_streaming_reader_missing_path_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         list(iter_raw(tmp_path / "does-not-exist"))
+
+
+def _canonical_key(message: RawMessage) -> tuple[int, str, int]:
+    return (message.recv_ts_ns, message.connection_id, message.ingest_seq)
+
+
+_MESSAGE_DATA = st.tuples(
+    st.integers(min_value=0, max_value=8),
+    st.sampled_from(["conn-a", "conn-b", "conn-c"]),
+    st.integers(min_value=0, max_value=4),
+)
+
+
+def _messages_from_data(values: Sequence[tuple[int, str, int]]) -> list[RawMessage]:
+    return [
+        _raw(
+            connection_id=connection_id,
+            ingest_seq=ingest_seq,
+            recv_ts_ns=recv_ts_ns,
+            payload=f'{{"i":{index}}}',
+        )
+        for index, (recv_ts_ns, connection_id, ingest_seq) in enumerate(values)
+    ]
+
+
+# Each input overwrites the same two file paths, so reusing the pytest
+# tmp_path across examples is intentional.
+@settings(
+    derandomize=True,
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    values=st.lists(_MESSAGE_DATA, min_size=1, max_size=25),
+    seed=st.integers(min_value=0, max_value=2**32 - 1),
+)
+def test_shuffled_line_orders_are_sorted_exactly(
+    values: list[tuple[int, str, int]], seed: int, tmp_path: Path
+) -> None:
+    messages = _messages_from_data(values)
+    shuffled = list(messages)
+    random.Random(seed).shuffle(shuffled)
+    path = tmp_path / "shuffled.jsonl.zst"
+    _write_raw(path, shuffled)
+    expected, expected_stats = _reference_iter_raw(path)
+    stats = RawReadStats()
+    assert list(iter_raw(path, stats=stats)) == expected
+    assert stats == expected_stats
+
+    # The exact reverse of the canonical order always contains an inversion
+    # when more than one distinct key is drawn, so it always forces the
+    # external-sort fallback.
+    reversed_messages = sorted(messages, key=_canonical_key, reverse=True)
+    reversed_path = tmp_path / "reversed.jsonl.zst"
+    _write_raw(reversed_path, reversed_messages)
+    expected_reversed, _ = _reference_iter_raw(reversed_path)
+    assert list(iter_raw(reversed_path)) == expected_reversed
+
+
+def _write_ordered(path: Path, count: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle, zstd.ZstdCompressor().stream_writer(handle) as writer:
+        for index in range(count):
+            writer.write(
+                encode_line(
+                    _raw(
+                        connection_id="kraken-memory",
+                        ingest_seq=index,
+                        recv_ts_ns=1_000_000_000 + index,
+                    )
+                )
+            )
+
+
+def _iteration_peak_bytes(path: Path) -> int:
+    gc.collect()
+    tracemalloc.start()
+    try:
+        for _ in iter_raw(path):
+            pass
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return peak
+
+
+def test_in_order_file_streams_with_memory_independent_of_size(tmp_path: Path) -> None:
+    small = tmp_path / "small.jsonl.zst"
+    large = tmp_path / "large.jsonl.zst"
+    _write_ordered(small, 50_000)
+    _write_ordered(large, 200_000)
+
+    small_peak = _iteration_peak_bytes(small)
+    large_peak = _iteration_peak_bytes(large)
+
+    # A bounded-memory reader's peak does not grow with the line count; the
+    # ratio catches per-file materialization while tolerating allocator noise.
+    assert large_peak < small_peak * 1.5
+    assert large_peak < 32 * 1024 * 1024
+
+
+def test_fallback_spills_bounded_runs_and_removes_temporaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(rawio, "_SORT_RUN_LINES", 4)
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
+
+    path = tmp_path / "shuffled.jsonl.zst"
+    messages = [
+        _raw(connection_id="kraken-run", ingest_seq=index, recv_ts_ns=value)
+        for index, value in enumerate([5, 1, 4, 0, 3, 9, 2, 8, 6, 7, 10, 11, 12])
+    ]
+    _write_raw(path, messages)
+    expected, expected_stats = _reference_iter_raw(path)
+
+    stats = RawReadStats()
+    assert list(iter_raw(path, stats=stats)) == expected
+    assert stats == expected_stats
+    assert list(temp_root.iterdir()) == []
+
+    stream = iter_raw(path)
+    assert next(stream) == expected[0]
+    stream.close()
+    assert list(temp_root.iterdir()) == []
