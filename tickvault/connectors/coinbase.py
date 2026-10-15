@@ -33,6 +33,7 @@ from tickvault.connectors._ws import (
     SleepFn,
     control_payload,
     make_connection_id,
+    wait_first,
 )
 from tickvault.models import RawMessage
 
@@ -222,12 +223,7 @@ class CoinbaseConnector:
         while True:
             receiver = asyncio.create_task(socket.recv())
             command = asyncio.create_task(commands.get())
-            done, pending = await asyncio.wait(
-                {receiver, command}, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            done = await wait_first((receiver, command))
             if receiver in done:
                 frame = receiver.result()
                 if isinstance(frame, bytes):
@@ -250,9 +246,4 @@ class CoinbaseConnector:
         """Sleep for the backoff, waking early when :meth:`close` is called."""
         sleeper: asyncio.Task[None] = asyncio.create_task(self._sleep(seconds))
         stopper: asyncio.Task[bool] = asyncio.create_task(self._stop.wait())
-        _, pending = await asyncio.wait(
-            {sleeper, stopper}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        await wait_first((sleeper, stopper))
