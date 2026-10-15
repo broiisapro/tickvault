@@ -1,0 +1,43 @@
+{
+  "window": {
+    "start": "2026-10-01T12:00:00Z",
+    "end": "2026-10-01T12:10:00Z"
+  },
+  "url": "https://datasets.tardis.dev/v1/coinbase/trades/2026/10/01/BTC-USD.csv.gz",
+  "tardis_trades": 2089,
+  "tickvault_trades": 2087,
+  "matched": 2084,
+  "missing_in_tickvault": 5,
+  "extra_in_tickvault": 3,
+  "price_mismatches": 2,
+  "size_mismatches": 1,
+  "side_mismatches": 1,
+  "missing_in_tickvault_ids": [
+    "1100888825",
+    "1100888919",
+    "1100889330",
+    "1100889841",
+    "1100890318"
+  ],
+  "extra_in_tickvault_ids": [
+    "9000000001",
+    "9000000002",
+    "9000000003"
+  ],
+  "price_mismatch_ids": [
+    "1100888829",
+    "1100889441"
+  ],
+  "size_mismatch_ids": [
+    "1100888855"
+  ],
+  "side_mismatch_ids": [
+    "1100889068"
+  ],
+  "notes": [
+    "matched counts trades whose id is present on both sides (2089 - 5 = 2084); the price/size/side mismatch lists are subsets of matched.",
+    "missing_in_tickvault and extra_in_tickvault are the unmatched id lists.",
+    "TickVault rows use exchange_ts_ns = timestamp * 1000 and recv_ts_ns = local_timestamp * 1000; ingest_seq is the final row index.",
+    "the deliberate discrepancies are chosen by fixed row index and are stable for the 2026-10-01 Tardis file."
+  ]
+}
