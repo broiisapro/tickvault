@@ -164,6 +164,15 @@ through unconditionally.
 Event `detail` strings are JSON with sorted keys and compact separators, so
 replay is byte-deterministic.
 
+**Correction (Epic 2).** Per-symbol connection scope replaces the venue-wide
+rule above (issue #55): every `connect` control now declares the `symbols` its
+connection serves, and the connection becomes authoritative for exactly those
+symbols, emitting `reconnect` (and moving the symbol to `SYNCING`) only for a
+symbol that already had an authoritative connection. Recordings whose
+`connect` has no `symbols` keep the venue-wide rule for symbols already known
+on the venue; a symbol first seen later belongs to the first connection that
+delivers a message for it.
+
 ### Kraken checksum
 
 `kraken_checksum(bids, asks) -> int` (`tickvault/book/kraken_checksum.py`)
@@ -296,6 +305,13 @@ reconnects and invariant violations, plus lag percentiles, coverage and
 row has `unexplained > 0`), deterministic `to_json` (sorted keys, no
 wall-clock fields), `to_markdown`, `to_text_table` and `write_reports` writing
 `qa-<date>.json` and `qa-<date>.md`.
+
+**Correction (Epic 2).** `QARow` gained `book_missing` (true when a row has
+messages but zero venue snapshots) and `exit_code` now returns 1 for it as
+well as for `unexplained > 0` (issue #56). With a `date` filter, a resync for
+the same venue/symbol up to 300 s into the next day explains an anomaly of the
+filtered day, and the totals line reports the number of rows with a missing
+book.
 
 ### Reconcile
 
