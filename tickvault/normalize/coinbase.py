@@ -15,10 +15,11 @@ The normalized ``trades.side`` is the **taker** side. Both Coinbase feeds
 report the **maker** side: the Exchange feed documents ``side`` as "The side
 of the maker order" and Advanced Trade documents it as "The maker's side of
 the trade". A 60-second live capture on 2026-10-15 compared Exchange
-``matches`` with Advanced Trade ``market_trades`` for BTC-USD: all 628 common
-trade ids carried the same side (modulo case), so the mapping inverts the
-venue value -- ``BUY`` (maker bought, taker sold) becomes ``sell`` and
-``SELL`` (maker sold, taker bought) becomes ``buy``.
+``matches`` with Advanced Trade ``market_trades`` for BTC-USD: every common
+trade id (1982 in one capture, 628 in another) carried the same side modulo
+case, so the mapping inverts the venue value -- ``BUY`` (maker bought, taker
+sold) becomes ``sell`` and ``SELL`` (maker sold, taker bought) becomes
+``buy``.
 """
 
 from __future__ import annotations

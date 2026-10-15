@@ -106,6 +106,7 @@ def test_recorded_fixture_normalizes_every_line(
 
     sequences = [n.sequence for n in normalized if n.raw.kind == "msg"]
     assert None not in sequences
+    assert sequences[0] == 0
     assert sequences == list(range(sequences[0], sequences[0] + len(sequences)))
 
 
@@ -265,6 +266,7 @@ def test_normalized_message_carries_raw() -> None:
         '{"timestamp":"2026-10-15T03:18:52Z","sequence_num":1}',
         '{"channel":"l2_data","sequence_num":1,"events":[]}',
         '{"channel":"l2_data","timestamp":"2026-10-15T03:18:52Z","sequence_num":"1","events":[]}',
+        json.dumps(_snapshot_message() | {"timestamp": None}),
         json.dumps(_snapshot_message() | {"events": "no"}),
         json.dumps(
             _snapshot_message()
@@ -329,6 +331,24 @@ def test_normalized_message_carries_raw() -> None:
                                 "event_time": "2026-10-15T03:18:52Z",
                                 "price_level": "1",
                                 "new_quantity": "NaN",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        json.dumps(
+            _snapshot_message()
+            | {
+                "events": [
+                    {
+                        "type": "update",
+                        "product_id": "BTC-USD",
+                        "updates": [
+                            {
+                                "side": "bid",
+                                "price_level": "1",
+                                "new_quantity": "1",
                             }
                         ],
                     }
