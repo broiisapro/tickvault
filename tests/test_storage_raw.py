@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 import zstandard as zstd
+from typer.testing import CliRunner
 
+from tickvault.cli import app
 from tickvault.models import RawMessage, Trade
 from tickvault.paths import raw_file_path
 from tickvault.rawio import RawReadStats, encode_line, iter_raw
@@ -245,5 +248,49 @@ def test_raw_files_unchanged_by_storage_functions(tmp_path: Path) -> None:
     assert columns == ["count_star()"]
     assert rows == [(3,)]
 
+    after = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in raw_files}
+    assert after == digests
+
+
+def test_raw_files_unchanged_after_all_commands(tmp_path: Path, fixtures_dir: Path) -> None:
+    root = tmp_path / "data"
+    messages: list[RawMessage] = []
+    for name in ("coinbase_btc_5m.jsonl.zst", "kraken_btc_5m.jsonl.zst"):
+        messages.extend(iter_raw(fixtures_dir / name))
+    with RawWriter(root) as raw_writer:
+        for message in messages:
+            raw_writer.write(message)
+
+    raw_files = sorted((root / "raw").rglob("*.jsonl.zst"))
+    assert raw_files
+    digests = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in raw_files}
+    date = datetime.fromtimestamp(
+        messages[0].recv_ts_ns // 1_000_000_000, tz=UTC
+    ).strftime("%Y-%m-%d")
+
+    runner = CliRunner()
+    replay = runner.invoke(app, ["replay", "--input", str(root), "--out", str(root)])
+    assert replay.exit_code == 0, replay.output
+    qa = runner.invoke(app, ["qa", "--data", str(root)])
+    assert qa.exit_code == 0, qa.output
+    compact_result = runner.invoke(app, ["compact", "--data", str(root), "--date", date])
+    assert compact_result.exit_code == 0, compact_result.output
+    sql = runner.invoke(
+        app, ["sql", "--data", str(root), "-c", "select count(*) from trades"]
+    )
+    assert sql.exit_code == 0, sql.output
+    reconcile = runner.invoke(
+        app,
+        [
+            "reconcile",
+            "--fixture",
+            str(fixtures_dir / "tardis_coinbase_trades_sample.csv.gz"),
+            "--data",
+            str(fixtures_dir / "tv_coinbase_trades_sample"),
+        ],
+    )
+    assert reconcile.exit_code == 0, reconcile.output
+
+    assert sorted((root / "raw").rglob("*.jsonl.zst")) == raw_files
     after = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in raw_files}
     assert after == digests
