@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 
 import pytest
@@ -12,6 +13,7 @@ from tickvault.connectors._ws import (
     control_payload,
     make_connection_id,
     utc_stamp,
+    wait_first,
 )
 
 
@@ -81,3 +83,58 @@ def test_backoff_jitter_only_shortens_the_schedule() -> None:
 def test_backoff_rejects_invalid_parameters(kwargs: dict[str, float]) -> None:
     with pytest.raises(ValueError):
         Backoff(**kwargs)
+
+
+def _pending_tasks() -> list[asyncio.Task[object]]:
+    current = asyncio.current_task()
+    return [task for task in asyncio.all_tasks() if task is not current and not task.done()]
+
+
+async def test_wait_first_cancels_and_awaits_the_pending_task() -> None:
+    cancelled = asyncio.Event()
+
+    async def slow() -> str:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "slow"
+
+    quick = asyncio.create_task(asyncio.sleep(0, result="quick"))
+    slow_task = asyncio.create_task(slow())
+
+    done = await wait_first((quick, slow_task))
+
+    assert done == {quick}
+    assert quick.result() == "quick"
+    assert cancelled.is_set()
+    assert slow_task.cancelled()
+    assert _pending_tasks() == []
+
+
+async def test_wait_first_propagates_cancellation_and_cleans_up_every_task() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def waiter() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def helper() -> None:
+        await wait_first((asyncio.create_task(waiter()), asyncio.create_task(waiter())))
+
+    task = asyncio.create_task(helper())
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cancelled.is_set()
+    assert task.cancelled()
+    assert _pending_tasks() == []

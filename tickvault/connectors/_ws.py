@@ -4,18 +4,20 @@ Both connectors build the same raw stream: one ``connect`` control line per
 connection, every received frame as a ``msg`` line with ``recv_ts_ns`` stamped
 at receipt and a contiguous per-connection ``ingest_seq``, and one
 ``disconnect`` control line when the connection ends. These helpers build the
-connection ids, control payloads, raw envelopes and reconnect backoff used by
-both, with the clock and sleep injectable so tests never wait on wall time.
+connection ids, control payloads, raw envelopes, reconnect backoff and the
+cancellation-safe task wait used by both, with the clock and sleep injectable
+so tests never wait on wall time.
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import random
 import secrets
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Collection, Coroutine
 from typing import Any
 
 from tickvault.models import RawKind, RawMessage
@@ -51,6 +53,30 @@ def control_payload(event: str, **fields: object) -> str:
     document: dict[str, object] = {"event": event}
     document.update(fields)
     return json.dumps(document, separators=(",", ":"), ensure_ascii=False)
+
+
+async def wait_first(tasks: Collection[asyncio.Task[Any]]) -> set[asyncio.Task[Any]]:
+    """Wait until one task finishes, cancelling and awaiting the rest.
+
+    The cancellation-safe replacement for
+    ``asyncio.wait(tasks, return_when=FIRST_COMPLETED)``: the pending tasks
+    are always cancelled and awaited, and when the wait itself is cancelled
+    (a closing connector) every task is cancelled and awaited before
+    ``CancelledError`` propagates. Done tasks keep their exceptions for the
+    caller to read with ``.result()``; nothing is ever left unretrieved or
+    pending afterwards.
+    """
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    return done
 
 
 class RawEmitter:

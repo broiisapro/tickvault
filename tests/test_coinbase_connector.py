@@ -8,6 +8,7 @@ by wall-clock sleeps, and the connector's clock and sleep are injected.
 from __future__ import annotations
 
 import asyncio
+import gc
 import itertools
 import json
 from collections.abc import AsyncIterator, Callable
@@ -248,3 +249,47 @@ async def test_close_before_stream_finishes_immediately() -> None:
     connector = CoinbaseConnector(["BTC-USD"])
     await connector.close()
     assert [message async for message in connector.stream()] == []
+
+
+async def _consume(connector: CoinbaseConnector, connected: asyncio.Event) -> None:
+    async for _message in connector.stream():
+        connected.set()
+
+
+async def test_cancel_mid_stream_leaves_nothing_pending_or_unretrieved() -> None:
+    loop = asyncio.get_running_loop()
+    recorded: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    previous_debug = loop.get_debug()
+    loop.set_exception_handler(lambda _loop, context: recorded.append(context))
+    loop.set_debug(True)
+    try:
+        async with fake_venue() as (venue, url):
+            connector = CoinbaseConnector(
+                ["BTC-USD"], url=url, clock=FakeClock(), token_hex=token_factory()
+            )
+            connected = asyncio.Event()
+            task = asyncio.create_task(_consume(connector, connected))
+            await asyncio.wait_for(connected.wait(), timeout=10)
+            # The pump creates its receiver/command tasks before the server
+            # sees the subscriptions, so this pins the state we cancel from.
+            await venue.wait_for_received(3)
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await connector.close()
+            await connector.close()
+            await asyncio.sleep(0.05)
+
+            pending = [
+                pending_task
+                for pending_task in asyncio.all_tasks()
+                if pending_task is not asyncio.current_task() and not pending_task.done()
+            ]
+            assert pending == []
+            gc.collect()
+            assert recorded == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+        loop.set_debug(previous_debug)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import re
@@ -363,6 +364,49 @@ async def test_negative_progress_interval_is_rejected(tmp_path: Path) -> None:
         await run_live(
             ["coinbase"], ["BTC-USD"], tmp_path / "data", progress_interval=-1
         )
+
+
+async def test_cancelling_run_live_mid_stream_leaves_nothing_pending(
+    tmp_path: Path,
+) -> None:
+    loop = asyncio.get_running_loop()
+    recorded: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    previous_debug = loop.get_debug()
+    loop.set_exception_handler(lambda _loop, context: recorded.append(context))
+    loop.set_debug(True)
+    try:
+        connector = FakeConnector("coinbase", infinite=True, delay=0.001)
+        out = tmp_path / "data"
+        task = asyncio.create_task(
+            run_live(
+                ["coinbase"],
+                ["BTC-USD"],
+                out,
+                connector_factories={"coinbase": _factory(connector)},
+            )
+        )
+        while not (out / "raw").exists():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.05)
+
+        pending = [
+            pending_task
+            for pending_task in asyncio.all_tasks()
+            if pending_task is not asyncio.current_task() and not pending_task.done()
+        ]
+        assert pending == []
+        assert connector.closed
+        gc.collect()
+        assert recorded == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+        loop.set_debug(previous_debug)
 
 
 _SUBPROCESS_SCRIPT = '''\
