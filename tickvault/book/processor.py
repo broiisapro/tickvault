@@ -277,10 +277,17 @@ class BookProcessor:
         self._maybe_sample(msg, update, state, output)
 
     def _verify_checksum(self, state: _SymbolState, update: BookUpdate) -> int | None:
+        """Truncate a registered venue's book to the subscribed depth and hash it.
+
+        Returns the computed checksum, or ``None`` when the venue is not in the
+        registry or the message carries no checksum to compare against.
+        """
         checksum_fn = self.checksum_registry.get(state.venue)
-        if checksum_fn is None or update.checksum is None:
+        if checksum_fn is None:
             return None
         state.book.truncate(self.kraken_depth)
+        if update.checksum is None:
+            return None
         bids, asks = state.book.top(_TOP_LEVELS)
         return checksum_fn(bids, asks)
 
