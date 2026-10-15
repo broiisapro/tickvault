@@ -1,6 +1,6 @@
 # TickVault architecture
 
-Status: Epic 2.
+Status: Phase 1 release (v1.0.0).
 
 ## 1. What it is
 
@@ -136,3 +136,12 @@ Only one agent per wave may change `pyproject.toml`/`uv.lock`.
 - **Streaming replay.** The raw reader merges files lazily in canonical order, so replay memory is bounded by the number of open files, not the size of the raw tree.
 - **Layout of generated outputs.** Daily QA reports: `<data>/reports/qa-<date>.json|md`. Manifests: `<data>/manifests/date=<date>/manifest.json`. Bundled dashboard sample: `dashboard/sample/` (a data root).
 - **Pipeline module.** `tickvault/pipeline.py` provides `run_replay` and `run_live`; every CLI command is a thin wrapper over the pipeline or an Epic 1 function, and Dagster assets call the same functions.
+
+#### 13. Amendments for the Phase 1 release
+
+- **Bounded-memory replay.** The raw reader streams each file. Files written in canonical order (the normal case) are passed through directly; a file with an out-of-order line is sorted with an external merge sort over bounded runs in temporary files. Memory no longer depends on file size, and the output order is unchanged.
+- **Observable ingestion.** `tickvault ingest` logs a start line, one progress line per interval (default 10 s: elapsed time, raw messages per venue, trades, book deltas, anomalies, resyncs, bytes written) and a final summary, all through Python logging to stderr, so `docker compose logs ingester` shows the run.
+- **Disk guard without directory walks.** The raw and Parquet writers count the bytes they write. `--max-gb` compares the data root's size at start-up plus those counters with the limit.
+- **Clean shutdown.** Connectors and the live pipeline cancel and await every task they start; closing is idempotent, and a venue closing the socket during shutdown is not an error.
+- **Bundled sample.** `dashboard/sample/` is a replay of a 30-minute real capture of BTC-USD and ETH-USD on both venues, compacted with manifests, under 60 MB and QA-clean. The raw capture itself is not published in Phase 1.
+- **Hosting.** The dashboard runs on Streamlit Community Cloud from `dashboard/app.py`, installing `dashboard/requirements.txt`, which is exported from `uv.lock` and checked by a test. The QA site is static HTML built by `scripts/build_qa_site.py` (index, one page per day, `latest.json`) and deployed to GitHub Pages by `.github/workflows/pages.yml`. CI runs `lint`, `types` and `tests` on self-hosted macOS ARM64 runners; the move to GitHub-hosted `ubuntu-24.04-arm` runners is pending the raw reader's temporary-file cleanup fix on Python 3.12.3 and must land before the repository goes public.
