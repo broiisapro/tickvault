@@ -1,0 +1,46 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "dashboard/sample/**"
+      - "scripts/build_qa_site.py"
+      - "tickvault/qa/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  site-build:
+    name: site-build
+    if: vars.TICKVAULT_PAGES == 'on'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uv sync --frozen --no-default-groups
+      - run: uv run --no-sync python scripts/build_qa_site.py --data dashboard/sample --out site
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+          include-hidden-files: true
+
+  site-deploy:
+    name: site-deploy
+    if: vars.TICKVAULT_PAGES == 'on'
+    needs: site-build
+    runs-on: ubuntu-24.04-arm
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
