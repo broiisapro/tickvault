@@ -1,0 +1,22 @@
+{
+  "fixtures": [
+    {
+      "path": "tests/fixtures/coinbase_btc_5m.jsonl.zst",
+      "sha256": "7c8b2772dbe345453d908335dc3c265458e17498e1902bfa03fac279bc5ce3b8",
+      "line_count": 6822,
+      "venue": "coinbase",
+      "recorded_at": "2026-10-15T11:56:18Z",
+      "source_url": "wss://advanced-trade-ws.coinbase.com",
+      "generator": "scripts/record_fixture.py"
+    },
+    {
+      "path": "tests/fixtures/kraken_btc_5m.jsonl.zst",
+      "sha256": "219e7f5066a52fd7d8ca0153f61f77583f0de9cb4a76cb73453df3a41ef478e9",
+      "line_count": 21829,
+      "venue": "kraken",
+      "recorded_at": "2026-10-15T11:56:19Z",
+      "source_url": "wss://ws.kraken.com/v2",
+      "generator": "scripts/record_fixture.py"
+    }
+  ]
+}
