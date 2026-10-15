@@ -1,8 +1,8 @@
 """Typer command-line interface.
 
-The command signatures and options are the contract for Epic 2. ``ingest`` and
-``replay`` call the pipeline entry points; the remaining bodies are stubs that
-print ``not implemented yet`` to stderr and exit with code 2.
+Every command is a thin layer over the pipeline or an Epic 1 function, so the
+Dagster assets and the CLI share the same code paths. ``bench`` is the only
+remaining stub and lands in its own issue.
 
 Exit codes: ``0`` on success, ``1`` on an unexpected error, ``2`` on invalid
 arguments, ``3`` when ``ingest --max-gb`` stopped because the data root grew
@@ -14,12 +14,30 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
+from collections.abc import Sequence
+from datetime import date as Date
 from pathlib import Path
 from typing import Annotated, NoReturn
 
+import duckdb
 import typer
 
 from tickvault.pipeline import PipelineStats, run_live, run_replay
+from tickvault.qa.report import exit_code as qa_exit_code
+from tickvault.qa.report import run_qa, to_json, to_text_table, write_reports
+from tickvault.reconcile.download import reconcile_live_day
+from tickvault.reconcile.tardis import (
+    ReconcileReport,
+    load_tardis_trades,
+    load_tickvault_trades,
+    report_to_json,
+    report_to_text,
+)
+from tickvault.reconcile.tardis import reconcile as reconcile_trades
+from tickvault.sql import run_query, view_ddl
+from tickvault.storage.compact import CompactionError
+from tickvault.storage.compact import compact as compact_partitions
+from tickvault.storage.manifest import write_manifest
 
 app = typer.Typer(
     help="TickVault: live crypto market-data pipeline.",
@@ -86,6 +104,28 @@ def _print_stats(stats: PipelineStats) -> None:
     print(f"resync requests: {stats.resync_requests}")
 
 
+def _format_table(columns: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
+    """Render query results as an aligned text table (header, rule, rows)."""
+    if not columns:
+        return "(no columns)\n"
+    cells = [["NULL" if value is None else str(value) for value in row] for row in rows]
+    widths = [len(column) for column in columns]
+    for row in cells:
+        widths = [max(width, len(cell)) for width, cell in zip(widths, row, strict=True)]
+    lines = ["  ".join(column.ljust(width) for column, width in zip(columns, widths, strict=True))]
+    lines.append("  ".join("-" * width for width in widths))
+    lines.extend(
+        "  ".join(cell.rjust(width) for cell, width in zip(row, widths, strict=True))
+        for row in cells
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _print_reconcile_report(report: ReconcileReport, *, as_json: bool) -> None:
+    text = report_to_json(report) if as_json else report_to_text(report)
+    print(text, end="")
+
+
 @app.command()
 def ingest(
     venues: Annotated[
@@ -142,9 +182,33 @@ def qa(
         str | None,
         typer.Option("--date", help="UTC date to report on (YYYY-MM-DD); all days when omitted."),
     ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Print the JSON report instead of the text table.")
+    ] = False,
+    reports: Annotated[
+        bool,
+        typer.Option("--reports", help="Also write <data>/reports/qa-<date>.json and .md."),
+    ] = False,
 ) -> None:
     """Print the per-venue/symbol data-quality report."""
-    _not_implemented()
+    try:
+        report = run_qa(data, date)
+    except ValueError as exc:
+        _usage_error(str(exc))
+    if json_output:
+        print(to_json(report), end="")
+    else:
+        print(to_text_table(report), end="")
+    if reports:
+        days = (
+            [report.date]
+            if report.date is not None
+            else sorted({row.date for row in report.rows})
+        )
+        for day in days:
+            json_path, markdown_path = write_reports(run_qa(data, day), data / "reports", day)
+            print(f"wrote {json_path} and {markdown_path}")
+    raise typer.Exit(code=qa_exit_code(report))
 
 
 @app.command()
@@ -153,7 +217,21 @@ def compact(
     date: Annotated[str, typer.Option("--date", help="UTC date to compact (YYYY-MM-DD).")],
 ) -> None:
     """Merge small hourly Parquet files into one per table/venue/hour."""
-    _not_implemented()
+    try:
+        result = compact_partitions(data, date)
+    except CompactionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from None
+    except ValueError as exc:
+        _usage_error(str(exc))
+    manifest_path = write_manifest(data, date)
+    print(
+        f"compacted {result.files_written} partition(s): "
+        f"{result.files_removed} files merged into {result.files_written}, {result.rows} rows"
+    )
+    for partition in result.partitions:
+        print(f"  {partition.output}: {partition.inputs} files -> 1, {partition.rows} rows")
+    print(f"manifest: {manifest_path}")
 
 
 @app.command()
@@ -165,7 +243,15 @@ def sql(
     ] = None,
 ) -> None:
     """Open DuckDB views over the Parquet tree, or run one query."""
-    _not_implemented()
+    if command is None:
+        print(view_ddl(data), end="")
+        return
+    try:
+        columns, rows = run_query(data, command)
+    except duckdb.Error as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from None
+    print(_format_table(columns, rows), end="")
 
 
 @app.command()
@@ -186,11 +272,57 @@ def reconcile(
     ] = None,
     data: Annotated[
         Path | None,
-        typer.Option("--data", help="TickVault trades sample for offline reconciliation."),
+        typer.Option("--data", help="TickVault data root or trades sample to reconcile."),
     ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Print the JSON report instead of the text summary.")
+    ] = False,
 ) -> None:
     """Compare captured trades against Tardis.dev reference data."""
-    _not_implemented()
+    resolved_venue = venue if venue is not None else "coinbase"
+    resolved_symbol = symbol if symbol is not None else "BTC-USD"
+    if fixture is not None and tardis_date is not None:
+        _usage_error("--fixture and --tardis-date are mutually exclusive")
+    if fixture is not None:
+        if data is None:
+            _usage_error("--data is required with --fixture")
+        try:
+            report = reconcile_trades(
+                load_tardis_trades(fixture),
+                load_tickvault_trades(data, resolved_venue, resolved_symbol),
+            )
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise typer.Exit(code=1) from None
+    elif tardis_date is not None:
+        if data is None:
+            _usage_error("--data is required with --tardis-date")
+        try:
+            day = Date.fromisoformat(tardis_date)
+        except ValueError as exc:
+            _usage_error(str(exc))
+        if day.day != 1:
+            _usage_error(
+                "Tardis free datasets exist only for the first day of each month: "
+                f"{tardis_date} is not the 1st"
+            )
+        try:
+            report = reconcile_live_day(
+                data,
+                day,
+                data / "cache",
+                venue=resolved_venue,
+                symbol=resolved_symbol,
+            )
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise typer.Exit(code=1) from None
+    else:
+        _usage_error(
+            "provide --fixture <csv.gz> --data <root> or "
+            "--tardis-date <YYYY-MM-01> --data <root>"
+        )
+    _print_reconcile_report(report, as_json=json_output)
 
 
 @app.command()
