@@ -53,7 +53,6 @@ DEFAULT_SERIES_ROWS = 3000
 QA_CACHE_TTL_S = 10.0
 """How long a per-day QA result stays valid; matches the app's cache TTL."""
 
-_DATE_PATTERN = r"\d{4}-\d{2}-\d{2}"
 _qa_cache: dict[tuple[str, str], tuple[float, tuple[QARow, ...]]] = {}
 
 
@@ -67,7 +66,7 @@ def message_rate(
 ) -> pd.DataFrame:
     """Messages per second per venue over the newest ``window_seconds``.
 
-    One row per venue and per-minute bucket, counted from the distinct
+    One row per venue and per ``bucket_seconds`` bucket, counted from the distinct
     ``(connection_id, ingest_seq)`` pairs appearing in ``trades`` or
     ``book_deltas`` (a message that produces several rows counts once). The
     window ends at the newest ``recv_ts_ns`` in those tables, so "the last
