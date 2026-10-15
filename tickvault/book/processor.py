@@ -18,10 +18,18 @@ State-machine rules, from the architecture document, section 8:
 - Invariants after every applied update: best bid < best ask, no negative
   size, no duplicate levels → ``invariant_violation``, SYNCING, resync
   request.
-- Control ``connect`` with a new ``connection_id`` for a venue → that
-  connection becomes authoritative for its symbols, symbols go SYNCING, emit
-  ``reconnect`` (not for the very first connection of a venue in a session).
-  Control ``disconnect`` → ``disconnect`` event.
+- Control ``connect`` with a new ``connection_id`` → the connection becomes
+  authoritative for the symbols it declares (``symbols`` in the control
+  payload). Each declared symbol that already had an authoritative connection
+  emits ``reconnect`` and goes SYNCING; a symbol's first authoritative
+  connection emits nothing and stays SYNCING until its first snapshot.
+  Symbols a connection does not declare are untouched.
+- Control ``connect`` without ``symbols`` (older recordings) keeps the legacy
+  venue-wide rule for symbols already known on the venue: a later connection
+  emits ``reconnect`` for each of them. A symbol first seen later belongs to
+  the first connection that delivers a message for it (not the venue's most
+  recent connection).
+- Control ``disconnect`` → ``disconnect`` event.
 - While LIVE, emit a ``book_snapshots`` ``sample`` (top 10 per side) for each
   symbol every 1 s of exchange time (first update at or after each whole
   second). This feeds the dashboard's top-of-book and spread/mid charts
@@ -40,9 +48,12 @@ Implementation notes:
   checksum can be verified, and its rows are not emitted.
 - ``detail`` strings are ``json.dumps`` with sorted keys and no whitespace, so
   the output is deterministic in replay.
-- A connection's symbols are learned from the book updates it sends; a gap
-  affects those symbols, one event and one resync request each, in sorted
-  order.
+- A connection's symbols are learned from the book updates it sends, plus the
+  ``symbols`` its ``connect`` declares; a gap affects those symbols, one event
+  and one resync request each, in sorted order.
+- ``symbols`` lists in control payloads are deduplicated and sorted before
+  they are applied, so a connection that declares its symbols twice or in a
+  different order produces identical output.
 """
 
 from __future__ import annotations
@@ -62,6 +73,7 @@ from tickvault.models import (
     Event,
     NormalizedMessage,
     PriceLevel,
+    RawMessage,
     Side,
     SnapshotSource,
     Trade,
@@ -120,6 +132,21 @@ def _message_exchange_ts_ns(msg: NormalizedMessage) -> int | None:
     return None
 
 
+def _control_symbols(control: dict[str, object] | None) -> list[str] | None:
+    """The deduplicated, sorted ``symbols`` a control payload declares.
+
+    Returns ``None`` when the payload has no usable ``symbols`` list, which
+    selects the legacy venue-wide behaviour for recordings made before
+    connections declared their scope.
+    """
+    if control is None:
+        return None
+    value = control.get("symbols")
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+        return None
+    return sorted(set(value))
+
+
 class BookProcessor:
     """Deterministic processor turning normalized messages into table rows.
 
@@ -137,7 +164,6 @@ class BookProcessor:
         self._states: dict[tuple[str, str], _SymbolState] = {}
         self._connection_symbols: dict[str, set[str]] = {}
         self._venue_connections: dict[str, set[str]] = {}
-        self._venue_current: dict[str, str] = {}
 
     def process(self, msg: NormalizedMessage) -> ProcessorOutput:
         """Apply one message and return the rows and resync requests it produced."""
@@ -445,11 +471,15 @@ class BookProcessor:
             )
 
     def _handle_connect(self, msg: NormalizedMessage, output: ProcessorOutput) -> None:
+        """Scope a new connection to the symbols its control payload declares."""
         raw = msg.raw
         seen = self._venue_connections.setdefault(raw.venue, set())
         first_connection = not seen
         seen.add(raw.connection_id)
-        self._venue_current[raw.venue] = raw.connection_id
+        declared = _control_symbols(msg.control)
+        if declared is not None:
+            self._connect_declared_symbols(raw, declared, output)
+            return
         if first_connection:
             return
         for symbol in self._venue_symbols(raw.venue):
@@ -457,17 +487,45 @@ class BookProcessor:
             state.connection_id = raw.connection_id
             state.live = False
             state.resync_reason = "reconnect"
-            output.events.append(
-                Event(
-                    venue=raw.venue,
-                    symbol=symbol,
-                    recv_ts_ns=raw.recv_ts_ns,
-                    connection_id=raw.connection_id,
-                    ingest_seq=raw.ingest_seq,
-                    event_type="reconnect",
-                    detail=_EMPTY_DETAIL,
+            output.events.append(self._reconnect_event(raw, symbol))
+
+    def _connect_declared_symbols(
+        self,
+        raw: RawMessage,
+        symbols: list[str],
+        output: ProcessorOutput,
+    ) -> None:
+        """Make ``raw``'s connection authoritative for ``symbols``.
+
+        A symbol that already had an authoritative connection is being
+        reconnected: it goes SYNCING and emits ``reconnect``. A symbol whose
+        first authoritative connection this is stays untouched apart from its
+        new state.
+        """
+        known = self._connection_symbols.setdefault(raw.connection_id, set())
+        known.update(symbols)
+        for symbol in symbols:
+            state = self._states.get((raw.venue, symbol))
+            if state is None:
+                self._states[(raw.venue, symbol)] = _SymbolState(
+                    venue=raw.venue, symbol=symbol, connection_id=raw.connection_id
                 )
-            )
+                continue
+            state.connection_id = raw.connection_id
+            state.live = False
+            state.resync_reason = "reconnect"
+            output.events.append(self._reconnect_event(raw, symbol))
+
+    def _reconnect_event(self, raw: RawMessage, symbol: str) -> Event:
+        return Event(
+            venue=raw.venue,
+            symbol=symbol,
+            recv_ts_ns=raw.recv_ts_ns,
+            connection_id=raw.connection_id,
+            ingest_seq=raw.ingest_seq,
+            event_type="reconnect",
+            detail=_EMPTY_DETAIL,
+        )
 
     def _venue_symbols(self, venue: str) -> list[str]:
         return sorted(symbol for (state_venue, symbol) in self._states if state_venue == venue)
@@ -475,7 +533,6 @@ class BookProcessor:
     def _ensure_state(self, venue: str, symbol: str, connection_id: str) -> _SymbolState:
         state = self._states.get((venue, symbol))
         if state is None:
-            authoritative = self._venue_current.get(venue, connection_id)
-            state = _SymbolState(venue=venue, symbol=symbol, connection_id=authoritative)
+            state = _SymbolState(venue=venue, symbol=symbol, connection_id=connection_id)
             self._states[(venue, symbol)] = state
         return state

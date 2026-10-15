@@ -2,9 +2,11 @@
 
 One connection per product, each carrying ``heartbeats``, ``level2`` and
 ``market_trades``, so a per-connection ``sequence_num`` gap always scopes to
-one product. Connections come back with the shared backoff schedule; every
-connection gets a fresh ``connection_id`` and an ``ingest_seq`` that restarts
-at ``0``.
+one product. Every ``connect`` control payload declares the one normalized
+symbol the connection serves in ``symbols``, so the book processor scopes the
+connection per symbol instead of per venue. Connections come back with the
+shared backoff schedule; every connection gets a fresh ``connection_id`` and
+an ``ingest_seq`` that restarts at ``0``.
 
 ``resync`` re-synchronizes one product by unsubscribing and re-subscribing
 ``level2`` on the live connection. Verified live on 2026-10-15: Advanced Trade
@@ -190,7 +192,12 @@ class CoinbaseConnector:
                 try:
                     await self._queue.put(
                         emitter.control(
-                            control_payload("connect", url=self._url, subscriptions=subscriptions)
+                            control_payload(
+                                "connect",
+                                url=self._url,
+                                symbols=[symbol],
+                                subscriptions=subscriptions,
+                            )
                         )
                     )
                     for payload in subscriptions:
