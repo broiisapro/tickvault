@@ -1,8 +1,9 @@
 """Tests for the Dagster daily job (issue #58).
 
 The data root is built by replaying the committed synthetic session through
-the normalizer -> BookProcessor -> ParquetWriter path, then the three assets
-are materialized in-process (no daemon, no webserver) for the session's
+``tickvault.pipeline.run_replay`` — the same normalizer -> BookProcessor ->
+ParquetWriter path live ingestion uses — then the three assets are
+materialized in-process (no daemon, no webserver) for the session's
 partition. The test asserts the Epic 1 report numbers the acceptance criteria
 name, the report files, the materialization metadata and that the written
 manifest verifies.
@@ -11,38 +12,15 @@ manifest verifies.
 import json
 import sys
 import time
-from collections.abc import Callable
 from pathlib import Path
 
 import dagster as dg
 
-from tickvault.book.processor import BookProcessor
-from tickvault.models import RawMessage
-from tickvault.normalize.coinbase import normalize as normalize_coinbase
-from tickvault.normalize.kraken import normalize as normalize_kraken
+from tickvault.pipeline import run_replay
 from tickvault.storage.manifest import verify_manifest
-from tickvault.storage.parquet_writer import ParquetWriter
 
 _PARTITION = "2026-11-01"
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _build_data_root(
-    root: Path, raw_path: Path, raw_lines: Callable[[str | Path], list[RawMessage]]
-) -> None:
-    """Replay one raw fixture into normalized Parquet under ``root``."""
-    processor = BookProcessor()
-    writer = ParquetWriter(root)
-    try:
-        for raw in raw_lines(raw_path):
-            normalizer = normalize_coinbase if raw.venue == "coinbase" else normalize_kraken
-            output = processor.process(normalizer(raw))
-            writer.write("trades", output.trades)
-            writer.write("book_deltas", output.book_deltas)
-            writer.write("book_snapshots", output.book_snapshots)
-            writer.write("events", output.events)
-    finally:
-        writer.close()
 
 
 def _materialization_metadata(result: dg.ExecuteInProcessResult) -> dict[str, dict[str, object]]:
@@ -58,7 +36,6 @@ def _materialization_metadata(result: dg.ExecuteInProcessResult) -> dict[str, di
 def test_daily_job_materializes_reports_and_manifest(
     tmp_path: Path,
     synthetic_gap_path: Path,
-    raw_lines: Callable[[str | Path], list[RawMessage]],
 ) -> None:
     # pytest does not put the repo root on sys.path and ``orchestration`` is a
     # top-level package next to it, not an installed one, so import it here.
@@ -72,7 +49,7 @@ def test_daily_job_materializes_reports_and_manifest(
 
     root = tmp_path / "data"
     started = time.monotonic()
-    _build_data_root(root, synthetic_gap_path, raw_lines)
+    run_replay(synthetic_gap_path, root)
     result = dg.materialize(
         [compacted_partitions, qa_report, manifest],
         partition_key=_PARTITION,
