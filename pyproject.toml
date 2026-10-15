@@ -32,6 +32,7 @@ dev = [
     "hypothesis>=6.169",
     "ruff>=0.17",
     "mypy>=2.4",
+    "pyarrow-stubs",
 ]
 orchestration = [
     "dagster>=1.13.26,<2",
