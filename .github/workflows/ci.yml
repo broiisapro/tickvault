@@ -15,7 +15,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - run: uv run ruff check .
 
@@ -24,7 +24,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - run: uv run mypy tickvault
 
@@ -33,6 +33,6 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - run: uv run pytest -q
