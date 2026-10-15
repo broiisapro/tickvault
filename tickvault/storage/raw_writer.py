@@ -60,7 +60,21 @@ class RawWriter:
     def __init__(self, root: str | Path) -> None:
         self._root = Path(root)
         self._open_files: dict[str, _OpenFile] = {}
+        self._finished_bytes = 0
         self._closed = False
+
+    @property
+    def bytes_written(self) -> int:
+        """Compressed bytes this instance has handed to its raw files so far.
+
+        The counter advances when the zstd stream passes compressed data to a
+        file — a block or frame flush, or a close — so between flushes it can
+        lag the logical writes; after :meth:`close` it equals the total size of
+        every file this instance created. It only ever grows.
+        """
+        return self._finished_bytes + sum(
+            open_file.stream.tell() for open_file in self._open_files.values()
+        )
 
     def write(self, message: RawMessage) -> None:
         """Append ``message`` to its connection's file, rotating by hour.
@@ -99,6 +113,7 @@ class RawWriter:
             return
         for open_file in self._open_files.values():
             _close_stream(open_file.stream)
+            self._finished_bytes += open_file.stream.tell()
             open_file.handle.close()
         self._open_files.clear()
         self._closed = True
@@ -120,6 +135,7 @@ class RawWriter:
     def _rotate(self, message: RawMessage, previous: _OpenFile) -> _OpenFile:
         del self._open_files[message.connection_id]
         _close_stream(previous.stream)
+        self._finished_bytes += previous.stream.tell()
         previous.handle.close()
         return self._open_rotated(message, rotation=previous.rotation + 1)
 

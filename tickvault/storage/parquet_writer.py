@@ -92,7 +92,18 @@ class ParquetWriter:
         self._idle_flush_s = idle_flush_s
         self._clock = clock
         self._buffers: dict[_BufferKey, _Buffer] = {}
+        self._bytes_written = 0
         self._closed = False
+
+    @property
+    def bytes_written(self) -> int:
+        """Bytes on disk in the Parquet files this instance has finished.
+
+        Each file's size is counted once when it is renamed into place, so
+        open buffers (which are not on disk yet) contribute nothing and the
+        counter is monotonic.
+        """
+        return self._bytes_written
 
     def write(self, table: str, records: Sequence[NormalizedRecord]) -> None:
         """Buffer ``records`` for ``table``, flushing as the rules require.
@@ -178,6 +189,7 @@ class ParquetWriter:
                 row_group_size=_ROW_GROUP_SIZE,
             )
             temporary.replace(final)
+            self._bytes_written += final.stat().st_size
         except BaseException:
             with contextlib.suppress(FileNotFoundError):
                 temporary.unlink()

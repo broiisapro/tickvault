@@ -201,6 +201,38 @@ def test_multiple_connections_interleaved(tmp_path: Path) -> None:
     assert len(list(root.rglob("*.jsonl.zst"))) == 2
 
 
+def test_bytes_written_matches_compressed_file_sizes(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    writer = RawWriter(root)
+    assert writer.bytes_written == 0
+    previous = writer.bytes_written
+    for index in range(500):
+        writer.write(_raw(ingest_seq=index, recv_ts_ns=_BASE_NS + index))
+        assert writer.bytes_written >= previous
+        previous = writer.bytes_written
+    writer.flush()
+    path = raw_file_path(root, "kraken", _CONNECTION, _BASE_NS, 0)
+    assert writer.bytes_written == path.stat().st_size
+    assert writer.bytes_written > 0
+    writer.close()
+    files = sorted((root / "raw").rglob("*.jsonl.zst"))
+    assert writer.bytes_written == sum(file.stat().st_size for file in files)
+    assert writer.bytes_written > 0
+
+
+def test_bytes_written_sums_rotated_files(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    before = parse_rfc3339_ns("2026-10-15T23:59:59.999000000Z")
+    after = parse_rfc3339_ns("2026-10-16T00:00:00.000000000Z")
+    writer = RawWriter(root)
+    for index, recv_ts_ns in enumerate([before, before + 1_000, after, after + 1_000]):
+        writer.write(_raw(ingest_seq=index, recv_ts_ns=recv_ts_ns))
+    writer.close()
+    files = sorted((root / "raw").rglob("*.jsonl.zst"))
+    assert len(files) == 2
+    assert writer.bytes_written == sum(file.stat().st_size for file in files)
+
+
 def test_close_is_idempotent_and_write_after_close_raises(tmp_path: Path) -> None:
     writer = RawWriter(tmp_path / "data")
     writer.write(_raw(ingest_seq=0, recv_ts_ns=_BASE_NS))
