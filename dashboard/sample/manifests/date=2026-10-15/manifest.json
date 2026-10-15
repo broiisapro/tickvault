@@ -2,135 +2,81 @@
   "date": "2026-10-15",
   "files": [
     {
-      "bytes": 519537,
-      "hour": "11",
-      "path": "norm/book_deltas/venue=coinbase/date=2026-10-15/hour=11/compacted-2026-10-15-11.parquet",
-      "row_count": 56122,
-      "sha256": "71e70fd3a954e9431f34818451b20b5334f407dceaf3dc8fa952218ba99cc5f1",
+      "bytes": 10371095,
+      "hour": "17",
+      "path": "norm/book_deltas/venue=coinbase/date=2026-10-15/hour=17/compacted-2026-10-15-17.parquet",
+      "row_count": 1299806,
+      "sha256": "dc4a4054adb98201fca5373203883b622e23e0726990113989daac330a47eeef",
       "table": "book_deltas",
       "venue": "coinbase"
     },
     {
-      "bytes": 286165,
-      "hour": "12",
-      "path": "norm/book_deltas/venue=coinbase/date=2026-10-15/hour=12/compacted-2026-10-15-12.parquet",
-      "row_count": 32990,
-      "sha256": "6f8783b27bcf53510d35c08d9cc23e88cf7e0d779ce9101ced03ab79362d7a82",
-      "table": "book_deltas",
-      "venue": "coinbase"
-    },
-    {
-      "bytes": 279003,
-      "hour": "11",
-      "path": "norm/book_deltas/venue=kraken/date=2026-10-15/hour=11/compacted-2026-10-15-11.parquet",
-      "row_count": 16574,
-      "sha256": "45b37a67c958ca4bff83517e33912c1be4d5159aaaa3222632617b13c6fd8e08",
+      "bytes": 10424241,
+      "hour": "17",
+      "path": "norm/book_deltas/venue=kraken/date=2026-10-15/hour=17/compacted-2026-10-15-17.parquet",
+      "row_count": 540864,
+      "sha256": "9034d4ec8f84fb10b9c2185ea9afd68ed816e48177795c55f4defc95658dd113",
       "table": "book_deltas",
       "venue": "kraken"
     },
     {
-      "bytes": 194881,
-      "hour": "12",
-      "path": "norm/book_deltas/venue=kraken/date=2026-10-15/hour=12/compacted-2026-10-15-12.parquet",
-      "row_count": 11664,
-      "sha256": "e9b159ffd470a20d50e3d2c5f9e89ca2bf188f3c88920d24e0d63c72f311eb5e",
-      "table": "book_deltas",
-      "venue": "kraken"
-    },
-    {
-      "bytes": 835651,
-      "hour": "11",
-      "path": "norm/book_snapshots/venue=coinbase/date=2026-10-15/hour=11/compacted-2026-10-15-11.parquet",
-      "row_count": 44890,
-      "sha256": "c9147737a2a0924ecc11288f933e4b6526c63617309423c9b2cf03a53a4d96d6",
+      "bytes": 3410258,
+      "hour": "17",
+      "path": "norm/book_snapshots/venue=coinbase/date=2026-10-15/hour=17/compacted-2026-10-15-17.parquet",
+      "row_count": 230106,
+      "sha256": "ea383be85d85b133706a62846f8a922cc35652013ee707b8aa7a6fb452f9b964",
       "table": "book_snapshots",
       "venue": "coinbase"
     },
     {
-      "bytes": 20751,
-      "hour": "12",
-      "path": "norm/book_snapshots/venue=coinbase/date=2026-10-15/hour=12/compacted-2026-10-15-12.parquet",
-      "row_count": 1580,
-      "sha256": "0b6918ec4cb015e2d39dc165ee95fa2cd051cfc581201822edf9377ef40c42d7",
-      "table": "book_snapshots",
-      "venue": "coinbase"
-    },
-    {
-      "bytes": 27443,
-      "hour": "11",
-      "path": "norm/book_snapshots/venue=kraken/date=2026-10-15/hour=11/compacted-2026-10-15-11.parquet",
-      "row_count": 4430,
-      "sha256": "60617c3af035d7ed3fb076771e09ff4dbd6882baca8a06f34d4852cfee20d3ac",
+      "bytes": 563261,
+      "hour": "17",
+      "path": "norm/book_snapshots/venue=kraken/date=2026-10-15/hour=17/compacted-2026-10-15-17.parquet",
+      "row_count": 70820,
+      "sha256": "e1e1de26d8de45b06b205f64ab972c69edf3680fb0e42ec52746b70ed5b97d97",
       "table": "book_snapshots",
       "venue": "kraken"
     },
     {
-      "bytes": 17492,
-      "hour": "12",
-      "path": "norm/book_snapshots/venue=kraken/date=2026-10-15/hour=12/compacted-2026-10-15-12.parquet",
-      "row_count": 1600,
-      "sha256": "8970effc7bd1252ce3d8b059fb6cae3023bdc3667b2530190bbc9de5e737b1dc",
-      "table": "book_snapshots",
-      "venue": "kraken"
-    },
-    {
-      "bytes": 3269,
-      "hour": "12",
-      "path": "norm/events/venue=coinbase/date=2026-10-15/hour=12/part-coinbase-20261015T115618Z-191c3abb-000000006821.parquet",
-      "row_count": 1,
-      "sha256": "bdc3c53efd7813a7fc2d7116d437b921b0d44f3a51153bd10aa8458cbde00d14",
+      "bytes": 3604,
+      "hour": "17",
+      "path": "norm/events/venue=coinbase/date=2026-10-15/hour=17/compacted-2026-10-15-17.parquet",
+      "row_count": 5,
+      "sha256": "fae19b5d6a3a354af02210a51601f43bd429846fb727e2ea864e162f64e985ac",
       "table": "events",
       "venue": "coinbase"
     },
     {
-      "bytes": 3249,
-      "hour": "12",
-      "path": "norm/events/venue=kraken/date=2026-10-15/hour=12/part-kraken-20261015T115618Z-920d7f99-000000021828.parquet",
-      "row_count": 1,
-      "sha256": "3815b640340b0f6965897ee6b39aebff8d38b3932bfdfd430b537c220f4170e9",
+      "bytes": 3574,
+      "hour": "17",
+      "path": "norm/events/venue=kraken/date=2026-10-15/hour=17/part-kraken-20261015T170803Z-700ce0b7-000000305180.parquet",
+      "row_count": 6,
+      "sha256": "a960e2c367e25d6db545d46522aa36b5c2ae41e08ad1ff5356b76f42aa1febf4",
       "table": "events",
       "venue": "kraken"
     },
     {
-      "bytes": 28902,
-      "hour": "11",
-      "path": "norm/trades/venue=coinbase/date=2026-10-15/hour=11/compacted-2026-10-15-11.parquet",
-      "row_count": 1139,
-      "sha256": "1edddfd43c2ab68400cc815698b66574e194baa5870064082a2d08cbbb565c25",
+      "bytes": 513202,
+      "hour": "17",
+      "path": "norm/trades/venue=coinbase/date=2026-10-15/hour=17/compacted-2026-10-15-17.parquet",
+      "row_count": 19357,
+      "sha256": "2d079a7dcf1efde0bb70ff248a1ecc0de6eaffac25ee6a27cc99464403f64cce",
       "table": "trades",
       "venue": "coinbase"
     },
     {
-      "bytes": 14600,
-      "hour": "12",
-      "path": "norm/trades/venue=coinbase/date=2026-10-15/hour=12/compacted-2026-10-15-12.parquet",
-      "row_count": 510,
-      "sha256": "40c83885049b229e9b01d2ce6c598dc9ec9621b207feed07cfe116f87f9e06f9",
-      "table": "trades",
-      "venue": "coinbase"
-    },
-    {
-      "bytes": 8760,
-      "hour": "11",
-      "path": "norm/trades/venue=kraken/date=2026-10-15/hour=11/compacted-2026-10-15-11.parquet",
-      "row_count": 257,
-      "sha256": "e2f4f08c127508a008da09b73d3e338415a7d86b98c4b121e047a5d86093292c",
-      "table": "trades",
-      "venue": "kraken"
-    },
-    {
-      "bytes": 8226,
-      "hour": "12",
-      "path": "norm/trades/venue=kraken/date=2026-10-15/hour=12/compacted-2026-10-15-12.parquet",
-      "row_count": 228,
-      "sha256": "2e5df7a2b89af7dcf3ad71e51c43844d4b6104c4428e3ab16438d9d7f0af6b27",
+      "bytes": 162719,
+      "hour": "17",
+      "path": "norm/trades/venue=kraken/date=2026-10-15/hour=17/compacted-2026-10-15-17.parquet",
+      "row_count": 6937,
+      "sha256": "1943f583696a81fe61fc9b6a1dc2c89b91a640214a38169ad08c61920fa1d4c5",
       "table": "trades",
       "venue": "kraken"
     }
   ],
   "totals": {
-    "bytes": 2247929,
-    "files": 14,
-    "row_count": 171986
+    "bytes": 25451954,
+    "files": 8,
+    "row_count": 2167901
   }
 }
