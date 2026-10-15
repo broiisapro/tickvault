@@ -13,11 +13,8 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 def _plain(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
-COMMANDS = ["ingest", "replay", "qa", "compact", "sql", "reconcile", "bench"]
 
-STUB_INVOCATIONS = [
-    ["bench", "--input", "data/raw"],
-]
+COMMANDS = ["ingest", "replay", "qa", "compact", "sql", "reconcile", "bench"]
 
 COMMAND_OPTIONS = {
     "ingest": ["--venues", "--symbols", "--duration", "--out", "--max-gb"],
@@ -26,8 +23,10 @@ COMMAND_OPTIONS = {
     "compact": ["--data", "--date"],
     "sql": ["--data", "-c"],
     "reconcile": ["--tardis-date", "--venue", "--symbol", "--fixture", "--data", "--json"],
-    "bench": ["--input"],
+    "bench": ["--input", "--json"],
 }
+
+REQUIRED_OPTION_COMMANDS = ["ingest", "replay", "qa", "compact", "sql"]
 
 
 def test_help_lists_every_command() -> None:
@@ -47,16 +46,13 @@ def test_command_help_lists_its_options(command: str) -> None:
         assert option in output, f"{command} help is missing {option}"
 
 
-@pytest.mark.parametrize("args", STUB_INVOCATIONS, ids=[args[0] for args in STUB_INVOCATIONS])
-def test_command_stubs_exit_2(args: list[str]) -> None:
-    result = runner.invoke(app, args)
-    assert result.exit_code == 2
-    assert "not implemented yet" in result.stderr
-
-
-@pytest.mark.parametrize("command", COMMANDS)
+@pytest.mark.parametrize("command", REQUIRED_OPTION_COMMANDS)
 def test_missing_required_options_exit_2(command: str) -> None:
     result = runner.invoke(app, [command])
     assert result.exit_code == 2
-    if command == "bench":
-        assert "not implemented yet" in result.stderr
+
+
+def test_reconcile_without_mode_exits_2() -> None:
+    result = runner.invoke(app, ["reconcile"])
+    assert result.exit_code == 2
+    assert "error:" in result.stderr

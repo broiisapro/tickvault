@@ -1,8 +1,7 @@
 """Typer command-line interface.
 
 Every command is a thin layer over the pipeline or an Epic 1 function, so the
-Dagster assets and the CLI share the same code paths. ``bench`` is the only
-remaining stub and lands in its own issue.
+Dagster assets and the CLI share the same code paths.
 
 Exit codes: ``0`` on success, ``1`` on an unexpected error, ``2`` on invalid
 arguments, ``3`` when ``ingest --max-gb`` stopped because the data root grew
@@ -12,6 +11,7 @@ past the limit.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import sys
 from collections.abc import Sequence
@@ -22,6 +22,7 @@ from typing import Annotated, NoReturn
 import duckdb
 import typer
 
+from tickvault.bench import run_benchmark
 from tickvault.pipeline import PipelineStats, run_live, run_replay
 from tickvault.qa.report import exit_code as qa_exit_code
 from tickvault.qa.report import run_qa, to_json, to_text_table, write_reports
@@ -46,11 +47,6 @@ app = typer.Typer(
 
 _SUPPORTED_VENUES = ("coinbase", "kraken")
 _SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+$")
-
-
-def _not_implemented() -> None:
-    print("not implemented yet", file=sys.stderr)
-    raise typer.Exit(code=2)
 
 
 def _usage_error(message: str) -> NoReturn:
@@ -330,6 +326,17 @@ def bench(
     input: Annotated[
         Path | None, typer.Option("--input", help="Raw file or tree to benchmark.")
     ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Print the benchmark as JSON.")
+    ] = False,
 ) -> None:
     """Measure replay throughput for the benchmark reported in the README."""
-    _not_implemented()
+    try:
+        report = run_benchmark(None if input is None else [input])
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from None
+    if json_output:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(report.to_text(), end="")
