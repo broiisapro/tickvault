@@ -118,11 +118,10 @@ class RawWriter:
         return self._open_rotated(message, rotation=0)
 
     def _rotate(self, message: RawMessage, previous: _OpenFile) -> _OpenFile:
+        del self._open_files[message.connection_id]
         _close_stream(previous.stream)
         previous.handle.close()
-        opened = self._open_rotated(message, rotation=previous.rotation + 1)
-        self._open_files[message.connection_id] = opened
-        return opened
+        return self._open_rotated(message, rotation=previous.rotation + 1)
 
     def _open_rotated(self, message: RawMessage, *, rotation: int) -> _OpenFile:
         path = raw_file_path(
