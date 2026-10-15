@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 import signal
 import subprocess
 import sys
@@ -255,9 +257,112 @@ async def test_max_gb_stops_live_gracefully(tmp_path: Path) -> None:
     assert list(iter_raw(out))
 
 
+async def test_max_gb_uses_writer_counters_without_walking_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden_rglob(self: Path, pattern: str) -> object:
+        raise AssertionError("the live loop must not walk the data tree")
+
+    monkeypatch.setattr(Path, "rglob", forbidden_rglob)
+    connector = FakeConnector("coinbase", infinite=True, delay=0.001)
+    out = tmp_path / "data"
+
+    stats = await asyncio.wait_for(
+        run_live(
+            ["coinbase"],
+            ["BTC-USD"],
+            out,
+            max_gb=1e-9,
+            connector_factories={"coinbase": _factory(connector)},
+        ),
+        timeout=20,
+    )
+
+    assert stats.stopped_by == "max_gb"
+    assert connector.closed
+
+
+async def test_live_logs_start_progress_and_summary(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    connector = FakeConnector("coinbase", infinite=True, delay=0.001)
+    out = tmp_path / "data"
+    caplog.set_level(logging.INFO, logger="tickvault.pipeline")
+
+    stats = await asyncio.wait_for(
+        run_live(
+            ["coinbase"],
+            ["BTC-USD"],
+            out,
+            duration=0.5,
+            connector_factories={"coinbase": _factory(connector)},
+            progress_interval=0.1,
+        ),
+        timeout=20,
+    )
+
+    assert stats.stopped_by == "duration"
+    messages = [
+        record.message for record in caplog.records if record.name == "tickvault.pipeline"
+    ]
+    start = [message for message in messages if message.startswith("ingest starting")]
+    progress = [message for message in messages if message.startswith("ingest progress")]
+    final = [message for message in messages if message.startswith("ingest finished")]
+
+    assert len(start) == 1
+    assert "venues=coinbase" in start[0]
+    assert "symbols=BTC-USD" in start[0]
+    assert f"out={out}" in start[0]
+    assert len(final) == 1
+    assert "stopped=duration" in final[0]
+
+    # One line per interval, not per message: the endless connector produced
+    # far more messages than the schedule allows lines.
+    assert 2 <= len(progress) <= 8
+    assert stats.raw_lines > len(progress)
+    fields = re.compile(
+        r"^ingest progress: elapsed=\d+s raw_msgs=\d+ \(coinbase=\d+\) "
+        r"trades=\d+ book_deltas=\d+ anomalies=0 resyncs=0 written=\d+\.\dMB$"
+    )
+    assert all(fields.match(message) for message in progress)
+
+
+async def test_progress_interval_zero_disables_progress_lines(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    connector = FakeConnector("coinbase", infinite=True, delay=0.001)
+    out = tmp_path / "data"
+    caplog.set_level(logging.INFO, logger="tickvault.pipeline")
+
+    stats = await asyncio.wait_for(
+        run_live(
+            ["coinbase"],
+            ["BTC-USD"],
+            out,
+            duration=1.0,
+            connector_factories={"coinbase": _factory(connector)},
+            progress_interval=0,
+        ),
+        timeout=20,
+    )
+
+    assert stats.stopped_by == "duration"
+    assert not [
+        record for record in caplog.records if "ingest progress" in record.message
+    ]
+    assert any("ingest starting" in record.message for record in caplog.records)
+
+
 async def test_unknown_venue_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unsupported venue"):
         await run_live(["binance"], ["BTC-USD"], tmp_path / "data")
+
+
+async def test_negative_progress_interval_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="progress_interval"):
+        await run_live(
+            ["coinbase"], ["BTC-USD"], tmp_path / "data", progress_interval=-1
+        )
 
 
 _SUBPROCESS_SCRIPT = '''\

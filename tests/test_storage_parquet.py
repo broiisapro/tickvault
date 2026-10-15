@@ -305,6 +305,23 @@ def test_idle_flush_triggered_by_a_later_write(tmp_path: Path) -> None:
     writer.close()
 
 
+def test_bytes_written_tracks_finished_parquet_files(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    writer = ParquetWriter(root)
+    assert writer.bytes_written == 0
+    writer.write("trades", [_trade(0, exchange_ts_ns=_HOUR_10, ingest_seq=0)])
+    assert writer.bytes_written == 0
+    writer.flush()
+    files = _files(_partition(root, "trades"))
+    assert writer.bytes_written == sum(path.stat().st_size for path in files)
+    assert writer.bytes_written > 0
+    writer.write("trades", [_trade(1, exchange_ts_ns=_HOUR_10 + 1, ingest_seq=1)])
+    writer.close()
+    files = _files(_partition(root, "trades"))
+    assert len(files) == 2
+    assert writer.bytes_written == sum(path.stat().st_size for path in files)
+
+
 def test_write_after_close_raises_and_close_is_idempotent(tmp_path: Path) -> None:
     writer = ParquetWriter(tmp_path / "data")
     writer.write("trades", [_trade(0)])

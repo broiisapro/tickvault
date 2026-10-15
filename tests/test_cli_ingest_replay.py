@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import filecmp
 import json
+import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 
@@ -267,6 +268,85 @@ def test_ingest_stops_after_duration(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "live stopped: duration" in result.output
     assert connector.closed
     assert list(iter_raw(out))
+
+
+def test_ingest_progress_interval_controls_log_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="tickvault.pipeline")
+    _patch_connector_factories(monkeypatch, {"coinbase": EndlessConnector()})
+
+    result = runner.invoke(
+        app,
+        [
+            "ingest",
+            "--venues",
+            "coinbase",
+            "--symbols",
+            "BTC-USD",
+            "--out",
+            str(tmp_path / "data"),
+            "--duration",
+            "1",
+            "--progress-interval",
+            "0.1",
+            "--log-level",
+            "DEBUG",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    progress = [
+        record for record in caplog.records if "ingest progress" in record.message
+    ]
+    assert 2 <= len(progress) <= 12
+
+    caplog.clear()
+    _patch_connector_factories(monkeypatch, {"coinbase": EndlessConnector()})
+    disabled = runner.invoke(
+        app,
+        [
+            "ingest",
+            "--venues",
+            "coinbase",
+            "--symbols",
+            "BTC-USD",
+            "--out",
+            str(tmp_path / "data-disabled"),
+            "--duration",
+            "1",
+            "--progress-interval",
+            "0",
+        ],
+    )
+
+    assert disabled.exit_code == 0, disabled.output
+    assert not [
+        record for record in caplog.records if "ingest progress" in record.message
+    ]
+
+
+def test_ingest_rejects_unknown_log_level(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "ingest",
+            "--venues",
+            "coinbase",
+            "--symbols",
+            "BTC-USD",
+            "--out",
+            str(tmp_path / "data"),
+            "--log-level",
+            "loud",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "unknown log level" in result.stderr
+    assert not (tmp_path / "data").exists()
 
 
 @pytest.mark.parametrize(
