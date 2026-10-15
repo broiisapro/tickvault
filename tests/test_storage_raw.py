@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 import zstandard as zstd
 
-from tickvault.models import RawMessage
+from tickvault.models import RawMessage, Trade
 from tickvault.paths import raw_file_path
 from tickvault.rawio import RawReadStats, encode_line, iter_raw
+from tickvault.sql import run_query
+from tickvault.storage.compact import compact
+from tickvault.storage.manifest import write_manifest
+from tickvault.storage.parquet_writer import ParquetWriter
 from tickvault.storage.raw_writer import RawWriter
 from tickvault.timeutil import parse_rfc3339_ns
 
@@ -201,3 +206,44 @@ def test_close_is_idempotent_and_write_after_close_raises(tmp_path: Path) -> Non
     writer.flush()
     with pytest.raises(RuntimeError):
         writer.write(_raw(ingest_seq=1, recv_ts_ns=_BASE_NS + 1))
+
+
+def test_raw_files_unchanged_by_storage_functions(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    with RawWriter(root) as raw_writer:
+        for index in range(3):
+            raw_writer.write(_raw(ingest_seq=index, recv_ts_ns=_BASE_NS + index))
+    raw_files = sorted((root / "raw").rglob("*.jsonl.zst"))
+    assert len(raw_files) == 1
+    digests = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in raw_files}
+
+    parquet_writer = ParquetWriter(root, max_rows=1)
+    for index in range(3):
+        parquet_writer.write(
+            "trades",
+            [
+                Trade(
+                    venue="kraken",
+                    symbol="BTC-USD",
+                    exchange_ts_ns=_BASE_NS + index,
+                    recv_ts_ns=_BASE_NS + index,
+                    connection_id=_CONNECTION,
+                    ingest_seq=index,
+                    trade_id=str(index),
+                    price=Decimal("1"),
+                    size=Decimal("2"),
+                    side="buy",
+                    sequence=index,
+                )
+            ],
+        )
+    parquet_writer.close()
+
+    compact(root, "2026-10-15")
+    write_manifest(root, "2026-10-15")
+    columns, rows = run_query(root, "SELECT count(*) FROM trades")
+    assert columns == ["count_star()"]
+    assert rows == [(3,)]
+
+    after = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in raw_files}
+    assert after == digests
