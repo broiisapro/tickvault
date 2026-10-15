@@ -5,6 +5,13 @@ sample::
 
     streamlit run dashboard/app.py
 
+The header says what TickVault is, links the source and describes the current
+data root in one caption: the bundled sample's venues, symbols and UTC span
+(computed from the data, never hard-coded) or the live path when
+``TICKVAULT_DATA_DIR`` is set. Every time window -- including the "messages/s
+last 5 min" tile -- is anchored to the newest record in the root, so an old
+sample renders exactly like a live root.
+
 The app opens a fresh in-memory DuckDB connection per query (the views are
 cheap) and caches every result with ``st.cache_data(ttl=10)``, so a live root
 refreshes once every ten seconds. All aggregation and row capping happen in
@@ -38,6 +45,16 @@ _SERIES_ROWS = 2000
 _KPI_WINDOW_SECONDS = 300
 _CHART_WINDOW_SECONDS = 3600
 _CACHE_TTL_S = 10
+_TITLE = "TickVault — crypto market-data quality"
+_SOURCE_URL = "https://github.com/broiisapro/tickvault"
+_INTRO = (
+    "TickVault streams level-2 order books and trades from Coinbase and Kraken, "
+    "stores every raw frame untouched and normalizes the feeds into hourly "
+    "Parquet, validating them for sequence gaps, Kraken CRC32 checksums and "
+    "book invariants. This page shows the resulting message throughput, "
+    "quality events, top of book, spreads and per-day QA report for the "
+    "current data root."
+)
 
 
 def _default_data_root() -> str:
@@ -67,6 +84,11 @@ def _run(root: str, query: Callable[..., pd.DataFrame], /, **kwargs: Any) -> pd.
 @st.cache_data(ttl=_CACHE_TTL_S, show_spinner=False)
 def _load_dimensions(root: str) -> pd.DataFrame:
     return _run(root, queries.dimensions)
+
+
+@st.cache_data(ttl=_CACHE_TTL_S, show_spinner=False)
+def _load_data_span(root: str) -> pd.DataFrame:
+    return _run(root, queries.data_span)
 
 
 @st.cache_data(ttl=_CACHE_TTL_S, show_spinner=False)
@@ -122,10 +144,38 @@ def _series_key(frame: pd.DataFrame) -> pd.Series:
     return frame["venue"] + " " + frame["symbol"]
 
 
+def _ns_to_timestamp(nanoseconds: int) -> pd.Timestamp:
+    return pd.to_datetime(nanoseconds, utc=True)
+
+
+def _root_caption(root_text: str, root: Path | None) -> str:
+    """One line describing the current data root, computed from the data."""
+    if os.environ.get(_ENV_DATA_ROOT):
+        return f"Live data root: `{root_text}`"
+    if root is None or not _has_normalized_data(root):
+        return f"Bundled sample: `{root_text}` (no normalized data yet)"
+    dimensions = _load_dimensions(str(root))
+    span = _load_data_span(str(root))
+    if dimensions.empty or span.empty:
+        return f"Bundled sample: `{root_text}` (no normalized data yet)"
+    first_value = span["first_ts_ns"].iloc[0]
+    last_value = span["last_ts_ns"].iloc[0]
+    if pd.isna(first_value) or pd.isna(last_value):
+        return f"Bundled sample: `{root_text}` (no normalized data yet)"
+    venues = ", ".join(sorted(dimensions["venue"].unique().tolist()))
+    symbols = ", ".join(sorted(dimensions["symbol"].unique().tolist()))
+    first = _ns_to_timestamp(int(first_value))
+    last = _ns_to_timestamp(int(last_value))
+    minutes = max(1, round((last - first).total_seconds() / 60))
+    if first.date() == last.date():
+        span_text = f"{first:%Y-%m-%d %H:%M:%S}\u2013{last:%H:%M:%S} UTC"
+    else:
+        span_text = f"{first:%Y-%m-%d %H:%M:%S}\u2013{last:%Y-%m-%d %H:%M:%S} UTC"
+    return f"Bundled sample: {venues} \u00b7 {symbols} \u00b7 {span_text} ({minutes} min)"
+
+
 def main() -> None:
     st.set_page_config(page_title="TickVault", layout="wide")
-    st.title("TickVault")
-    st.caption("Data quality and market state over the normalized Parquet layer.")
 
     with st.sidebar:
         st.header("Data")
@@ -136,10 +186,16 @@ def main() -> None:
         )
 
     root_text = root_text.strip()
-    if not root_text:
+    root = Path(root_text).expanduser() if root_text else None
+
+    st.title(_TITLE)
+    st.markdown(_INTRO)
+    st.markdown(f"[Source on GitHub]({_SOURCE_URL})")
+    st.caption(_root_caption(root_text, root))
+
+    if root is None:
         st.info("Enter a TickVault data root in the sidebar.")
         return
-    root = Path(root_text).expanduser()
     if not _has_normalized_data(root):
         st.info(
             f"No normalized Parquet data under `{root}`. Replay a raw fixture with "
