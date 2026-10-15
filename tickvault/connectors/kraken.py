@@ -1,9 +1,11 @@
 """Live Kraken websocket v2 connector.
 
 One connection carries every symbol: ``book`` at the configured depth and
-``trade`` with ``snapshot: false``. Symbols are translated from the pipeline's
-``BASE-QUOTE`` to Kraken's ``BASE/QUOTE`` only on the wire; control records and
-the connector API use the normalized symbol.
+``trade`` with ``snapshot: false``. Each ``connect`` control payload declares
+all normalized symbols the connection serves in ``symbols``, so the book
+processor scopes the connection per symbol. Symbols are translated from the
+pipeline's ``BASE-QUOTE`` to Kraken's ``BASE/QUOTE`` only on the wire; control
+records and the connector API use the normalized symbol.
 
 ``resync`` re-synchronizes one symbol by unsubscribing and re-subscribing
 ``book`` for it. Verified live on 2026-10-15: Kraken matches a subscription by
@@ -223,7 +225,12 @@ class KrakenConnector:
                 try:
                     await self._queue.put(
                         emitter.control(
-                            control_payload("connect", url=self._url, subscriptions=subscriptions)
+                            control_payload(
+                                "connect",
+                                url=self._url,
+                                symbols=list(self._symbols),
+                                subscriptions=subscriptions,
+                            )
                         )
                     )
                     for payload in subscriptions:
