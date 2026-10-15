@@ -1,4 +1,4 @@
-.PHONY: sync lint types test check bench docker-build demo-live demo-down
+.PHONY: sync lint types test check bench requirements docker-build demo-live demo-down
 
 sync:
 	uv sync --frozen
@@ -16,6 +16,9 @@ check: lint types test
 
 bench:
 	uv run tickvault bench
+
+requirements:
+	uv export --frozen --no-default-groups --group dashboard --no-hashes --no-header -o dashboard/requirements.txt
 
 docker-build:
 	docker compose build
