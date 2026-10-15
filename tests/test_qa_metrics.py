@@ -172,6 +172,7 @@ def test_missing_tables_count_as_empty(tmp_path: Path) -> None:
     assert rows.lag_p99_ms == 2.0
     assert rows.coverage == 1.0
     assert rows.unexplained == 0
+    assert rows.book_missing is True
 
 
 def test_messages_deduplicate_across_tables(tmp_path: Path) -> None:
@@ -207,6 +208,7 @@ def test_venue_snapshots_count_distinct_venue_snapshot_ids(tmp_path: Path) -> No
     (rows,) = compute_qa(tmp_path)
     assert rows.venue_snapshots == 2
     assert rows.messages == 4
+    assert rows.book_missing is False
 
 
 def test_lag_percentiles_over_trades_and_deltas(tmp_path: Path) -> None:
@@ -471,6 +473,20 @@ def test_dod_shape_gap_and_checksum_failures_are_resolved(tmp_path: Path) -> Non
     )
     _write(
         tmp_path,
+        "book_snapshots",
+        [
+            _snapshot(venue="coinbase", ts_ns=_ts(second=0), snapshot_id="conn-a:0", ingest_seq=0),
+            _snapshot(
+                venue="kraken",
+                ts_ns=_ts(second=0),
+                snapshot_id="conn-k:0",
+                connection_id="conn-k",
+                ingest_seq=0,
+            ),
+        ],
+    )
+    _write(
+        tmp_path,
         "events",
         [
             _event("gap", venue="coinbase", ts_ns=_ts(second=3), ingest_seq=2),
@@ -500,6 +516,111 @@ def test_dod_shape_gap_and_checksum_failures_are_resolved(tmp_path: Path) -> Non
     assert (coinbase.gaps, coinbase.resyncs, coinbase.unexplained) == (1, 1, 0)
     assert coinbase.trades == 1
     assert coinbase.book_deltas == 1
+    assert coinbase.venue_snapshots == 1
+    assert coinbase.book_missing is False
     assert (kraken.checksum_failures, kraken.resyncs, kraken.unexplained) == (1, 1, 0)
     assert kraken.trades == 1
     assert kraken.book_deltas == 1
+    assert kraken.venue_snapshots == 1
+    assert kraken.book_missing is False
+
+
+def test_messages_without_a_venue_snapshot_are_a_missing_book(tmp_path: Path) -> None:
+    _write(tmp_path, "book_deltas", [_delta(ts_ns=_ts(second=1), ingest_seq=0)])
+    (row,) = compute_qa(tmp_path)
+    assert row.messages == 1
+    assert row.venue_snapshots == 0
+    assert row.book_missing is True
+
+
+def test_sample_snapshots_do_not_fill_in_a_missing_book(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "book_snapshots",
+        [_snapshot(ts_ns=_ts(second=1), snapshot_id="conn-a:0", source="sample")],
+    )
+    (row,) = compute_qa(tmp_path)
+    assert row.messages == 1
+    assert row.venue_snapshots == 0
+    assert row.book_missing is True
+
+
+def test_a_venue_snapshot_clears_the_missing_book_flag(tmp_path: Path) -> None:
+    _write(tmp_path, "book_snapshots", [_snapshot(ts_ns=_ts(second=1), snapshot_id="conn-a:0")])
+    (row,) = compute_qa(tmp_path)
+    assert row.venue_snapshots == 1
+    assert row.book_missing is False
+
+
+def test_cross_midnight_resync_within_grace_explains_the_previous_day(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "events",
+        [
+            _event("gap", ts_ns=_ts(DAY, hour=23, second=3599), ingest_seq=0),
+            _event("resync", ts_ns=_ts(DAY2, hour=0, second=120), ingest_seq=0),
+        ],
+    )
+    (row,) = compute_qa(tmp_path, DAY)
+    assert row.date == DAY
+    assert row.gaps == 1
+    assert row.resyncs == 0
+    assert row.unexplained == 0
+
+
+def test_cross_midnight_resync_beyond_grace_does_not_explain(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "events",
+        [
+            _event("gap", ts_ns=_ts(DAY, hour=23, second=3599), ingest_seq=0),
+            _event("resync", ts_ns=_ts(DAY2, hour=0, second=600), ingest_seq=0),
+        ],
+    )
+    (row,) = compute_qa(tmp_path, DAY)
+    assert row.unexplained == 1
+
+
+def test_cross_midnight_resync_is_not_used_without_a_date_filter(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "events",
+        [
+            _event("gap", ts_ns=_ts(DAY, hour=23, second=3599), ingest_seq=0),
+            _event("resync", ts_ns=_ts(DAY2, hour=0, second=120), ingest_seq=0),
+        ],
+    )
+    rows = compute_qa(tmp_path)
+    assert [(row.date, row.unexplained) for row in rows] == [(DAY, 1), (DAY2, 0)]
+
+
+def test_cross_midnight_lookup_without_a_next_day_partition_is_empty(tmp_path: Path) -> None:
+    _write(tmp_path, "events", [_event("gap", ts_ns=_ts(DAY, hour=23, second=1), ingest_seq=0)])
+    (row,) = compute_qa(tmp_path, DAY)
+    assert row.unexplained == 1
+
+
+def test_cross_midnight_resync_does_not_explain_another_symbol(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "events",
+        [
+            _event(
+                "gap",
+                venue="coinbase",
+                symbol="BTC-USD",
+                ts_ns=_ts(DAY, hour=23, second=1),
+                ingest_seq=0,
+            ),
+            _event(
+                "resync",
+                venue="coinbase",
+                symbol="ETH-USD",
+                ts_ns=_ts(DAY2, hour=0, second=120),
+                ingest_seq=0,
+            ),
+        ],
+    )
+    (row,) = compute_qa(tmp_path, DAY)
+    assert row.symbol == "BTC-USD"
+    assert row.unexplained == 1

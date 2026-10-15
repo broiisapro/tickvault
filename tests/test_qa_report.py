@@ -42,6 +42,7 @@ GOLDEN_JSON = (
     "  \"rows\": [\n"
     "    {\n"
     "      \"book_deltas\": 1,\n"
+    "      \"book_missing\": true,\n"
     "      \"checksum_failures\": 0,\n"
     "      \"coverage\": 1.0,\n"
     "      \"date\": \"2026-10-01\",\n"
@@ -60,6 +61,7 @@ GOLDEN_JSON = (
     "    },\n"
     "    {\n"
     "      \"book_deltas\": 0,\n"
+    "      \"book_missing\": true,\n"
     "      \"checksum_failures\": 1,\n"
     "      \"coverage\": 1.0,\n"
     "      \"date\": \"2026-10-01\",\n"
@@ -83,32 +85,32 @@ GOLDEN_JSON = (
 GOLDEN_MARKDOWN = (
     "| venue | symbol | date | messages | trades | book_deltas | venue_snapshots |"
     " gaps | resyncs | checksum_failures | reconnects | invariant_violations |"
-    " lag_p50_ms | lag_p99_ms | coverage | unexplained |\n"
+    " lag_p50_ms | lag_p99_ms | coverage | unexplained | book_missing |\n"
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
-    " --- | --- | --- |\n"
+    " --- | --- | --- | --- |\n"
     "| coinbase | BTC-USD | 2026-10-01 | 5 | 2 | 1 | 0 | 1 | 1 | 0 | 0 | 0 | 2.0 |"
-    " 2.98 | 1.0 | 0 |\n"
+    " 2.98 | 1.0 | 0 | True |\n"
     "| kraken | BTC-USD | 2026-10-01 | 2 | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 1.0 | 1.0"
-    " | 1.0 | 1 |\n"
-    "| TOTAL | - | - | 7 | 3 | 1 | 0 | 1 | 1 | 1 | 0 | 0 | - | - | - | 1 |\n"
+    " | 1.0 | 1 | True |\n"
+    "| TOTAL | - | - | 7 | 3 | 1 | 0 | 1 | 1 | 1 | 0 | 0 | - | - | - | 1 | 2 |\n"
 )
 
 GOLDEN_TEXT = (
     "venue     symbol   date        messages  trades  book_deltas  venue_snapshots "
     " gaps  resyncs  checksum_failures  reconnects  invariant_violations  lag_p50_ms"
-    "  lag_p99_ms  coverage  unexplained\n"
+    "  lag_p99_ms  coverage  unexplained  book_missing\n"
     "--------  -------  ----------  --------  ------  -----------  --------------- "
     " ----  -------  -----------------  ----------  --------------------  ----------"
-    "  ----------  --------  -----------\n"
+    "  ----------  --------  -----------  ------------\n"
     "coinbase  BTC-USD  2026-10-01         5       2            1                0  "
     "   1        1                  0           0                     0         2.0 "
-    "       2.98       1.0            0\n"
+    "       2.98       1.0            0          True\n"
     "  kraken  BTC-USD  2026-10-01         2       1            0                0  "
     "   0        0                  1           0                     0         1.0 "
-    "        1.0       1.0            1\n"
+    "        1.0       1.0            1          True\n"
     "   TOTAL        -           -         7       3            1                0  "
     "   1        1                  1           0                     0           - "
-    "          -         -            1\n"
+    "          -         -            1             2\n"
 )
 
 
@@ -215,6 +217,7 @@ def test_totals_sum_every_count_column(tmp_path: Path) -> None:
         reconnects=0,
         invariant_violations=0,
         unexplained=1,
+        book_missing=2,
     )
 
 
@@ -222,11 +225,27 @@ def test_exit_code_is_one_when_any_row_is_unexplained(tmp_path: Path) -> None:
     report = _golden_report(tmp_path)
     assert exit_code(report) == 1
     explained = QAReport(
-        rows=tuple(replace(row, unexplained=0) for row in report.rows),
+        rows=tuple(replace(row, unexplained=0, book_missing=False) for row in report.rows),
         generated_from=report.generated_from,
         date=report.date,
     )
     assert exit_code(explained) == 0
+
+
+def test_exit_code_is_one_when_a_book_is_missing(tmp_path: Path) -> None:
+    report = _golden_report(tmp_path)
+    explained = QAReport(
+        rows=tuple(replace(row, unexplained=0) for row in report.rows),
+        generated_from=report.generated_from,
+        date=report.date,
+    )
+    assert exit_code(explained) == 1
+    recovered = QAReport(
+        rows=tuple(replace(row, unexplained=0, book_missing=False) for row in report.rows),
+        generated_from=report.generated_from,
+        date=report.date,
+    )
+    assert exit_code(recovered) == 0
 
 
 def test_exit_code_zero_for_empty_report() -> None:
