@@ -89,7 +89,7 @@ class RawWriter:
             open_file.last_flush_ns = message.recv_ts_ns
 
     def flush(self) -> None:
-        """Block-flush every open file; decoded data never loses flushed rows."""
+        """Block-flush every open file so everything written so far is decodable."""
         for open_file in self._open_files.values():
             open_file.stream.flush(zstd.FLUSH_BLOCK)
 
