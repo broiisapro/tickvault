@@ -1,0 +1,31 @@
+# Never copy these into an image: history, local environments, captured data
+# and agent/worktree scaffolding.
+.git
+.github
+.venv
+data
+reports
+.worktrees
+.orchestration
+.env
+.env.*
+.idea
+.vscode
+.DS_Store
+
+# Caches and build output
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.hypothesis
+dist
+
+# Not needed at runtime
+docs
+tests
+scripts
+docker
+compose.yaml
+Makefile

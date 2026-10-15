@@ -1,0 +1,86 @@
+# TickVault local stack (linux/arm64).
+#
+#   docker compose up -d --build      # ingester + dashboard, shared /data volume
+#   docker compose --profile orchestration up -d
+#
+# The ingester writes raw and normalized data into the tickvault-data volume;
+# the dashboard reads the same volume through TICKVAULT_DATA_DIR.
+
+name: tickvault
+
+services:
+  ingester:
+    platform: linux/arm64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: ingester
+    image: tickvault:ingester
+    command:
+      - tickvault
+      - ingest
+      - --venues
+      - coinbase,kraken
+      - --symbols
+      - BTC-USD,ETH-USD
+      - --out
+      - /data
+    restart: unless-stopped
+    volumes:
+      - tickvault-data:/data
+
+  dashboard:
+    platform: linux/arm64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dashboard
+    image: tickvault:dashboard
+    command:
+      - streamlit
+      - run
+      - dashboard/app.py
+      - --server.port
+      - "8501"
+      - --server.address
+      - 0.0.0.0
+    environment:
+      TICKVAULT_DATA_DIR: /data
+    ports:
+      - "8501:8501"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - tickvault-data:/data
+
+  dagster:
+    profiles: [orchestration]
+    platform: linux/arm64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: orchestration
+    image: tickvault:orchestration
+    environment:
+      DAGSTER_HOME: /home/tickvault/dagster
+      TICKVAULT_DATA_DIR: /data
+    command:
+      - dagster
+      - dev
+      - -m
+      - orchestration.definitions
+      - --host
+      - 0.0.0.0
+      - --port
+      - "3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - tickvault-data:/data
+
+volumes:
+  tickvault-data:
