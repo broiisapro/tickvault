@@ -12,6 +12,12 @@ from tickvault.models import BookUpdate, NormalizedMessage, PriceLevel, RawMessa
 _BASE_TS = 1_793_491_200_000_000_000  # 2026-11-01T00:00:00Z
 _COINBASE = "coinbase-20261101T000000Z-0000000a"
 _KRAKEN = "kraken-20261101T000000Z-0000000b"
+_COINBASE_BTC = "coinbase-20261101T000000Z-0000000c"
+_COINBASE_ETH = "coinbase-20261101T000000Z-0000000d"
+_COINBASE_ETH_2 = "coinbase-20261101T000000Z-0000000e"
+_COINBASE_LEGACY_A = "coinbase-20261101T000000Z-0000000f"
+_COINBASE_LEGACY_B = "coinbase-20261101T000000Z-00000010"
+_KRAKEN_2 = "kraken-20261101T000000Z-00000011"
 
 
 def lvl(price: str, size: str) -> PriceLevel:
@@ -352,6 +358,258 @@ def test_trades_pass_through_unchanged() -> None:
     output = processor.process(msg(_COINBASE, 7, sequence=9, trades=(trade,)))
     assert output.trades == [trade]
     assert output.book_deltas == [] and output.book_snapshots == []
+
+
+def test_declared_symbols_scope_each_connection() -> None:
+    """Two Coinbase products connect back-to-back; both books go live alone."""
+    processor = BookProcessor()
+    btc_connect = processor.process(
+        msg(_COINBASE_BTC, 0, control={"event": "connect", "symbols": ["BTC-USD"]})
+    )
+    eth_connect = processor.process(
+        msg(_COINBASE_ETH, 0, control={"event": "connect", "symbols": ["ETH-USD"]})
+    )
+    assert btc_connect.events == []
+    assert eth_connect.events == []
+
+    processor.process(
+        msg(
+            _COINBASE_BTC,
+            1,
+            sequence=1,
+            channel="l2_data",
+            book_updates=(update(snapshot=True, bids=(lvl("100", "1"),), asks=(lvl("101", "1"),)),),
+        )
+    )
+    processor.process(
+        msg(
+            _COINBASE_ETH,
+            1,
+            sequence=1,
+            channel="l2_data",
+            book_updates=(
+                update("ETH-USD", snapshot=True, bids=(lvl("10", "1"),), asks=(lvl("11", "1"),)),
+            ),
+        )
+    )
+
+    btc_delta = processor.process(
+        msg(
+            _COINBASE_BTC,
+            2,
+            sequence=2,
+            channel="l2_data",
+            book_updates=(update(snapshot=False, bids=(lvl("100", "2"),)),),
+        )
+    )
+    eth_delta = processor.process(
+        msg(
+            _COINBASE_ETH,
+            2,
+            sequence=2,
+            channel="l2_data",
+            book_updates=(update("ETH-USD", snapshot=False, asks=(lvl("11", "3"),)),),
+        )
+    )
+    assert [(row.symbol, row.side, row.price) for row in btc_delta.book_deltas] == [
+        ("BTC-USD", "bid", Decimal("100"))
+    ]
+    assert [(row.symbol, row.side, row.price) for row in eth_delta.book_deltas] == [
+        ("ETH-USD", "ask", Decimal("11"))
+    ]
+    assert btc_delta.events == []
+    assert eth_delta.events == []
+
+
+def test_reconnect_scopes_to_the_declared_symbols_only() -> None:
+    processor = BookProcessor()
+    processor.process(
+        msg(_COINBASE_BTC, 0, control={"event": "connect", "symbols": ["BTC-USD"]})
+    )
+    processor.process(
+        msg(_COINBASE_ETH, 0, control={"event": "connect", "symbols": ["ETH-USD"]})
+    )
+    processor.process(
+        msg(
+            _COINBASE_BTC,
+            1,
+            sequence=1,
+            channel="l2_data",
+            book_updates=(update(snapshot=True, bids=(lvl("100", "1"),), asks=(lvl("101", "1"),)),),
+        )
+    )
+    processor.process(
+        msg(
+            _COINBASE_ETH,
+            1,
+            sequence=1,
+            channel="l2_data",
+            book_updates=(
+                update("ETH-USD", snapshot=True, bids=(lvl("10", "1"),), asks=(lvl("11", "1"),)),
+            ),
+        )
+    )
+
+    reconnect = processor.process(
+        msg(_COINBASE_ETH_2, 0, control={"event": "connect", "symbols": ["ETH-USD"]})
+    )
+    assert [(event.event_type, event.symbol) for event in reconnect.events] == [
+        ("reconnect", "ETH-USD")
+    ]
+
+    stale = processor.process(
+        msg(
+            _COINBASE_ETH,
+            2,
+            sequence=2,
+            channel="l2_data",
+            book_updates=(update("ETH-USD", snapshot=False, asks=(lvl("11", "9"),)),),
+        )
+    )
+    assert stale.book_deltas == []
+
+    recovered = processor.process(
+        msg(
+            _COINBASE_ETH_2,
+            1,
+            sequence=1,
+            channel="l2_data",
+            book_updates=(
+                update("ETH-USD", snapshot=True, bids=(lvl("10", "2"),), asks=(lvl("11", "2"),)),
+            ),
+        )
+    )
+    assert [event.event_type for event in recovered.events] == ["resync"]
+    assert json.loads(recovered.events[0].detail) == {
+        "deltas_dropped": 1,
+        "reason": "reconnect",
+    }
+
+    btc_delta = processor.process(
+        msg(
+            _COINBASE_BTC,
+            2,
+            sequence=2,
+            channel="l2_data",
+            book_updates=(update(snapshot=False, bids=(lvl("100", "3"),)),),
+        )
+    )
+    assert [row.symbol for row in btc_delta.book_deltas] == ["BTC-USD"]
+
+
+def test_kraken_reconnect_marks_every_declared_symbol() -> None:
+    processor = BookProcessor()
+    processor.process(
+        msg(
+            _KRAKEN,
+            0,
+            venue="kraken",
+            control={"event": "connect", "symbols": ["BTC-USD", "ETH-USD"]},
+        )
+    )
+    processor.process(
+        msg(
+            _KRAKEN,
+            1,
+            venue="kraken",
+            channel="book",
+            book_updates=(update(snapshot=True, bids=(lvl("100", "1"),), asks=(lvl("101", "1"),)),),
+        )
+    )
+    processor.process(
+        msg(
+            _KRAKEN,
+            2,
+            venue="kraken",
+            channel="book",
+            book_updates=(
+                update("ETH-USD", snapshot=True, bids=(lvl("10", "1"),), asks=(lvl("11", "1"),)),
+            ),
+        )
+    )
+
+    reconnect = processor.process(
+        msg(
+            _KRAKEN_2,
+            0,
+            venue="kraken",
+            control={"event": "connect", "symbols": ["ETH-USD", "BTC-USD", "ETH-USD"]},
+        )
+    )
+    assert [(event.event_type, event.symbol) for event in reconnect.events] == [
+        ("reconnect", "BTC-USD"),
+        ("reconnect", "ETH-USD"),
+    ]
+
+    recovered = processor.process(
+        msg(
+            _KRAKEN_2,
+            1,
+            venue="kraken",
+            channel="book",
+            book_updates=(
+                update("ETH-USD", snapshot=True, bids=(lvl("10", "2"),), asks=(lvl("11", "2"),)),
+            ),
+        )
+    )
+    assert [event.event_type for event in recovered.events] == ["resync"]
+    assert json.loads(recovered.events[0].detail)["reason"] == "reconnect"
+
+
+def test_legacy_connect_leaves_new_symbols_to_their_first_connection() -> None:
+    """Recordings without ``symbols`` keep venue-wide reconnect for known ones.
+
+    A symbol first seen later belongs to the connection that delivers it, not
+    to the venue's most recent connection.
+    """
+    processor = BookProcessor()
+    processor.process(
+        msg(_COINBASE_LEGACY_A, 0, control={"event": "connect", "subscriptions": []})
+    )
+    processor.process(
+        msg(
+            _COINBASE_LEGACY_A,
+            1,
+            sequence=1,
+            channel="l2_data",
+            book_updates=(update(snapshot=True, bids=(lvl("100", "1"),), asks=(lvl("101", "1"),)),),
+        )
+    )
+
+    reconnect = processor.process(
+        msg(_COINBASE_LEGACY_B, 0, control={"event": "connect", "subscriptions": []})
+    )
+    assert [(event.event_type, event.symbol) for event in reconnect.events] == [
+        ("reconnect", "BTC-USD")
+    ]
+
+    late = processor.process(
+        msg(
+            _COINBASE_LEGACY_A,
+            2,
+            sequence=2,
+            channel="l2_data",
+            book_updates=(
+                update("ETH-USD", snapshot=True, bids=(lvl("10", "1"),), asks=(lvl("11", "1"),)),
+            ),
+        )
+    )
+    venue_rows = [row for row in late.book_snapshots if row.source == "venue"]
+    assert [(row.symbol, row.side) for row in venue_rows] == [
+        ("ETH-USD", "bid"),
+        ("ETH-USD", "ask"),
+    ]
+
+    dropped = processor.process(
+        msg(
+            _COINBASE_LEGACY_B,
+            1,
+            sequence=1,
+            channel="l2_data",
+            book_updates=(update("ETH-USD", snapshot=False, bids=(lvl("10", "5"),)),),
+        )
+    )
+    assert dropped.book_deltas == []
 
 
 def test_disconnect_is_a_venue_level_event() -> None:

@@ -122,6 +122,7 @@ async def test_stream_control_lines_frame_integrity_and_resync() -> None:
         assert connect == {
             "event": "connect",
             "url": url,
+            "symbols": ["BTC-USD"],
             "subscriptions": subscribe_payloads("BTC-USD"),
         }
         with pytest.raises(RuntimeError):
@@ -210,6 +211,7 @@ async def test_reconnect_gets_new_connection_id_and_grows_backoff() -> None:
         await venue.wait_for_received(9)
         assert venue.received == [compact(payload) for payload in subscribe_payloads("BTC-USD")] * 3
         assert json.loads(second_connect.payload)["subscriptions"] == subscribe_payloads("BTC-USD")
+        assert json.loads(third_connect.payload)["symbols"] == ["BTC-USD"]
 
         await connector.close()
         remaining = [message async for message in stream]
@@ -226,8 +228,9 @@ async def test_subscribe_replaces_symbols_before_the_stream_starts() -> None:
         await connector.subscribe(["ETH-USD"])
         stream = connector.stream()
         connect_line = await anext(stream)
-        subscriptions = json.loads(connect_line.payload)["subscriptions"]
-        assert subscriptions == subscribe_payloads("ETH-USD")
+        payload = json.loads(connect_line.payload)
+        assert payload["symbols"] == ["ETH-USD"]
+        assert payload["subscriptions"] == subscribe_payloads("ETH-USD")
         with pytest.raises(RuntimeError):
             await connector.subscribe(["BTC-USD"])
         await connector.close()

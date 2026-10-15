@@ -147,6 +147,7 @@ async def test_stream_control_lines_frame_integrity_and_resync() -> None:
         assert json.loads(connect_line.payload) == {
             "event": "connect",
             "url": url,
+            "symbols": ["BTC-USD"],
             "subscriptions": subscriptions,
         }
         with pytest.raises(RuntimeError):
@@ -239,6 +240,7 @@ async def test_reconnect_gets_new_connection_id_and_grows_backoff() -> None:
         await venue.wait_for_received(6)
         assert venue.received == [compact(payload) for payload in subscriptions] * 3
         assert json.loads(second_connect.payload)["subscriptions"] == subscriptions
+        assert json.loads(third_connect.payload)["symbols"] == ["BTC-USD", "ETH-USD"]
 
         await connector.close()
         remaining = [message async for message in stream]
@@ -283,6 +285,7 @@ async def test_rejected_subscribe_is_logged_and_reconnects(
         second_connect = await anext(stream)
         assert second_connect.connection_id == "kraken-20261101T000000Z-00000001"
         assert second_connect.ingest_seq == 0
+        assert json.loads(second_connect.payload)["symbols"] == ["BTC-USD"]
         assert slept == [1.0]
         assert "kraken rejected a subscribe request" in caplog.text
 
@@ -303,13 +306,14 @@ async def test_subscribe_replaces_symbols_before_the_stream_starts() -> None:
         await connector.subscribe(["ETH-USD"])
         stream = connector.stream()
         connect_line = await anext(stream)
-        subscriptions = json.loads(connect_line.payload)["subscriptions"]
-        assert subscriptions == subscribe_payloads(["ETH/USD"], depth=25)
+        payload = json.loads(connect_line.payload)
+        assert payload["symbols"] == ["ETH-USD"]
+        assert payload["subscriptions"] == subscribe_payloads(["ETH/USD"], depth=25)
         with pytest.raises(RuntimeError):
             await connector.subscribe(["BTC-USD"])
         await connector.close()
         [message async for message in stream]
-        assert venue.received == [compact(payload) for payload in subscriptions]
+        assert venue.received == [compact(frame) for frame in payload["subscriptions"]]
 
 
 async def test_resync_rejects_unknown_symbols() -> None:
