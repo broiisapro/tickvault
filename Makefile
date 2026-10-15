@@ -1,4 +1,4 @@
-.PHONY: sync lint types test check docker-build demo-live demo-down
+.PHONY: sync lint types test check bench docker-build demo-live demo-down
 
 sync:
 	uv sync --frozen
@@ -13,6 +13,9 @@ test:
 	uv run pytest -q
 
 check: lint types test
+
+bench:
+	uv run tickvault bench
 
 docker-build:
 	docker compose build
