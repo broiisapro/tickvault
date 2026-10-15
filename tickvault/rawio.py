@@ -124,20 +124,29 @@ def iter_raw(
     frame is skipped and counted in ``stats`` instead of raised. Pass a
     :class:`RawReadStats` instance to observe counters; ``stats.files`` counts
     files as they are opened and ``stats.messages`` counts messages as they
-    are yielded.
+    are yielded. A consumer that stops early closes the merge iterator and
+    every per-file stream in a ``finally``, so file handles and the
+    external-sort temporary directory are released immediately instead of
+    when the garbage collector finalizes the abandoned generators.
     """
     stats = RawReadStats() if stats is None else stats
     path = Path(path_or_dir)
     if not path.exists():
         raise FileNotFoundError(path)
     files = [path] if path.is_file() else sorted(path.rglob("*.jsonl.zst"))
-    streams = (_sorted_file(file_path, stats) for file_path in files)
-    for message in heapq.merge(*streams, key=_sort_key):
-        stats.messages += 1
-        yield message
+    streams = [_sorted_file(file_path, stats) for file_path in files]
+    merged = heapq.merge(*streams, key=_sort_key)
+    try:
+        for message in merged:
+            stats.messages += 1
+            yield message
+    finally:
+        merged.close()
+        for stream in streams:
+            stream.close()
 
 
-def _sorted_file(path: Path, stats: RawReadStats) -> Iterator[RawMessage]:
+def _sorted_file(path: Path, stats: RawReadStats) -> Generator[RawMessage, None, None]:
     """Yield one file's messages in canonical order with bounded memory.
 
     Whether the file is ordered has to be known before its first message is
