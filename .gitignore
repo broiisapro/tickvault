@@ -6,3 +6,19 @@
 # Local data
 data/
 .DS_Store
+
+# Python / uv
+.venv/
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+dist/
+
+# Reports
+reports/
+
+# Editors
+.idea/
+.vscode/
