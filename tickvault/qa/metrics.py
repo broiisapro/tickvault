@@ -8,19 +8,25 @@ same tree are deterministic.
 
 ``date`` restricts every table to one exchange-time partition day before the
 metrics are computed, including the "later resync" lookup used for
-``unexplained``. Raw-layer message counting is intentionally out of scope
-here; Epic 2 adds it when a raw tree is present (decision A24).
+``unexplained``. With a date filter, a resync in the next day's partition whose
+``recv_ts_ns`` is at most 300 s past the end of the filtered day also explains
+an anomaly of that day (decision A31). A venue/symbol/day row with messages
+but no venue snapshot is flagged ``book_missing`` (decision A30). Raw-layer
+message counting is intentionally out of scope here; Epic 2 adds it when a raw
+tree is present (decision A24).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from datetime import date as Date
 from pathlib import Path
 
 import duckdb
 
 _NS_PER_SECOND = 1_000_000_000
+_CROSS_MIDNIGHT_GRACE_NS = 300 * _NS_PER_SECOND
 _TABLE_NAMES = ("trades", "book_deltas", "book_snapshots", "events")
 _COUNTED_TABLES = ("trades", "book_deltas", "book_snapshots")
 _ANOMALY_EVENT_TYPES = ("gap", "checksum_failure", "invariant_violation")
@@ -32,6 +38,9 @@ type QAGroup = tuple[str, str, str]
 type EventOrder = tuple[int, str, int]
 """Canonical event order: ``(recv_ts_ns, connection_id, ingest_seq)``."""
 
+type EventRow = tuple[str, str, str, str, int, str, int]
+"""One row of the unexplained lookup: venue, symbol, day, type, order parts."""
+
 
 @dataclass(frozen=True, slots=True)
 class QARow:
@@ -39,7 +48,8 @@ class QARow:
 
     Counts are exact integers; ``lag_p50_ms``/``lag_p99_ms`` are rounded to
     three decimals and ``coverage`` to four. Lag and coverage default to
-    ``0.0`` when a row has no trades or book deltas.
+    ``0.0`` when a row has no trades or book deltas. ``book_missing`` is true
+    when messages arrived but no venue snapshot was stored (decision A30).
     """
 
     venue: str
@@ -58,6 +68,7 @@ class QARow:
     lag_p99_ms: float
     coverage: float
     unexplained: int
+    book_missing: bool
 
 
 @dataclass
@@ -208,18 +219,9 @@ def _add_event_counts(
         partial.invariant_violations = violations
 
 
-def _add_unexplained(
-    con: duckdb.DuckDBPyConnection, accumulators: dict[QAGroup, _Partial]
-) -> None:
-    """Count anomalies with no strictly later resync for the same group.
-
-    Events are ordered by ``(recv_ts_ns, connection_id, ingest_seq)``; a resync
-    explains every anomaly before it, and a resync recorded earlier never
-    explains a later anomaly. An anomaly and a resync at the exact same order
-    key are treated as unordered, so the anomaly stays unexplained.
-    """
+def _event_rows(con: duckdb.DuckDBPyConnection) -> list[EventRow]:
     types = ", ".join(_sql_quote(event_type) for event_type in _UNEXPLAINED_EVENT_TYPES)
-    rows = con.execute(
+    return con.execute(
         f"""
         select venue, symbol, cast(date as varchar) as day, event_type,
             recv_ts_ns, connection_id, ingest_seq
@@ -228,6 +230,65 @@ def _add_unexplained(
         order by venue, symbol, day, recv_ts_ns, connection_id, ingest_seq
         """
     ).fetchall()
+
+
+def _day_start_ns(day: str) -> int:
+    parsed = Date.fromisoformat(day)
+    return int(datetime(parsed.year, parsed.month, parsed.day, tzinfo=UTC).timestamp()) * (
+        _NS_PER_SECOND
+    )
+
+
+def _cross_midnight_resync_rows(
+    con: duckdb.DuckDBPyConnection, root: Path, iso_date: str
+) -> list[EventRow]:
+    """Resyncs in the next day's partition that explain a previous day.
+
+    Decision A31: with a date filter, a resync for the same venue/symbol whose
+    ``recv_ts_ns`` is at most 300 s past the end of the filtered day explains
+    an anomaly of that day. The rows are keyed to ``iso_date`` so they land in
+    the filtered day's group. A missing next-day partition counts as empty.
+    """
+    directory = root / "norm" / "events"
+    if not any(directory.rglob("*.parquet")):
+        return []
+    pattern = (directory / "**" / "*.parquet").as_posix()
+    next_day = (Date.fromisoformat(iso_date) + timedelta(days=1)).isoformat()
+    deadline_ns = _day_start_ns(next_day) + _CROSS_MIDNIGHT_GRACE_NS
+    rows = con.execute(
+        f"""
+        select venue, symbol, recv_ts_ns, connection_id, ingest_seq
+        from read_parquet({_sql_quote(pattern)}, hive_partitioning=true)
+        where date = DATE {_sql_quote(next_day)}
+            and event_type = 'resync'
+            and symbol is not null
+            and recv_ts_ns <= {deadline_ns}
+        """
+    ).fetchall()
+    return [
+        (venue, symbol, iso_date, "resync", recv_ts_ns, connection_id, ingest_seq)
+        for venue, symbol, recv_ts_ns, connection_id, ingest_seq in rows
+    ]
+
+
+def _add_unexplained(
+    con: duckdb.DuckDBPyConnection,
+    root: Path,
+    iso_date: str | None,
+    accumulators: dict[QAGroup, _Partial],
+) -> None:
+    """Count anomalies with no strictly later resync for the same group.
+
+    Events are ordered by ``(recv_ts_ns, connection_id, ingest_seq)``; a resync
+    explains every anomaly before it, and a resync recorded earlier never
+    explains a later anomaly. An anomaly and a resync at the exact same order
+    key are treated as unordered, so the anomaly stays unexplained. With a date
+    filter, the next day's first 300 s of resyncs join the lookup (A31).
+    """
+    rows = _event_rows(con)
+    if iso_date is not None:
+        rows.extend(_cross_midnight_resync_rows(con, root, iso_date))
+        rows.sort(key=lambda row: (row[0], row[1], row[2], row[4], row[5], row[6]))
     pending: dict[QAGroup, list[EventOrder]] = {}
     for venue, symbol, day, event_type, recv_ts_ns, connection_id, ingest_seq in rows:
         key = (venue, symbol, day)
@@ -263,6 +324,7 @@ def _to_row(venue: str, symbol: str, day: str, partial: _Partial) -> QARow:
         lag_p99_ms=partial.lag_p99_ms,
         coverage=partial.coverage,
         unexplained=partial.unexplained,
+        book_missing=partial.messages > 0 and partial.venue_snapshots == 0,
     )
 
 
@@ -271,13 +333,16 @@ def compute_qa(root: str | Path, date: str | Date | None = None) -> list[QARow]:
 
     ``root`` is a data root containing ``norm/<table>/venue=.../date=.../hour=...``.
     ``date`` (``YYYY-MM-DD`` string or :class:`datetime.date`) restricts the
-    computation to one partition day. Rows are sorted by venue, symbol, date.
+    computation to one partition day and, for that day, reads the next day's
+    first 300 s of resyncs (decision A31). Rows are sorted by venue, symbol,
+    date.
     """
     iso_date = _normalize_date(date)
     accumulators: dict[QAGroup, _Partial] = {}
+    root_path = Path(root)
     con = duckdb.connect()
     try:
-        available = _create_views(con, Path(root), iso_date)
+        available = _create_views(con, root_path, iso_date)
         if {"trades", "book_deltas"} & available:
             _add_trade_delta_metrics(con, available, accumulators)
         if available:
@@ -286,7 +351,7 @@ def compute_qa(root: str | Path, date: str | Date | None = None) -> list[QARow]:
             _add_venue_snapshots(con, accumulators)
         if "events" in available:
             _add_event_counts(con, accumulators)
-            _add_unexplained(con, accumulators)
+            _add_unexplained(con, root_path, iso_date, accumulators)
     finally:
         con.close()
     return [

@@ -26,6 +26,7 @@ _COUNT_FIELDS = (
     "reconnects",
     "invariant_violations",
     "unexplained",
+    "book_missing",
 )
 _COLUMNS = tuple(field.name for field in fields(QARow))
 
@@ -45,7 +46,11 @@ class QAReport:
 
 @dataclass(frozen=True, slots=True)
 class QATotals:
-    """Sums of the integer count columns across every row of a report."""
+    """Sums of the integer count columns across every row of a report.
+
+    ``book_missing`` is the number of rows with a missing book, not a sum of
+    integers; it is reported alongside the counts so the totals line shows it.
+    """
 
     rows: int
     messages: int
@@ -58,6 +63,7 @@ class QATotals:
     reconnects: int
     invariant_violations: int
     unexplained: int
+    book_missing: int
 
 
 def _iso_date(value: str | Date) -> str:
@@ -89,12 +95,13 @@ def totals(report: QAReport) -> QATotals:
         reconnects=sum(row.reconnects for row in report.rows),
         invariant_violations=sum(row.invariant_violations for row in report.rows),
         unexplained=sum(row.unexplained for row in report.rows),
+        book_missing=sum(1 for row in report.rows if row.book_missing),
     )
 
 
 def exit_code(report: QAReport) -> int:
-    """Return ``1`` when any row has an unexplained anomaly, else ``0``."""
-    return 1 if any(row.unexplained > 0 for row in report.rows) else 0
+    """Return ``1`` when any row is unexplained or missing its book, else ``0``."""
+    return 1 if any(row.unexplained > 0 or row.book_missing for row in report.rows) else 0
 
 
 def to_json(report: QAReport) -> str:
