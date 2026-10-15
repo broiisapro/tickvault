@@ -1,7 +1,27 @@
 [project]
 name = "tickvault"
-version = "0.1.0"
+version = "1.0.0"
 description = "Live crypto market-data pipeline: raw capture, normalized Parquet, validation and QA."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Moksh Siruvani" }]
+keywords = [
+    "market-data",
+    "data-engineering",
+    "crypto",
+    "order-book",
+    "websocket",
+    "parquet",
+    "duckdb",
+    "dagster",
+    "streamlit",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "websockets>=17.2",
@@ -14,6 +34,9 @@ dependencies = [
     "sortedcontainers>=2.4",
     "httpx>=0.28",
 ]
+
+[project.urls]
+Repository = "https://github.com/broiisapro/tickvault"
 
 [project.scripts]
 tickvault = "tickvault.cli:app"
