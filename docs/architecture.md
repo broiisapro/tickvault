@@ -1,6 +1,6 @@
 # TickVault architecture
 
-Status: Epic 0.
+Status: Epic 2.
 
 ## 1. What it is
 
@@ -128,3 +128,11 @@ Common columns: `venue` (string), `symbol` (string, `BASE-QUOTE`), `exchange_ts_
 Runtime: `websockets>=17.2`, `msgspec>=0.22`, `zstandard>=0.25`, `pyarrow>=26`, `polars>=1.30,<2` (Polars 2.0 shipped 2026-10-06 with row-order and dtype changes; stay on 1.x for Phase 1), `duckdb>=1.5.6,<2`, `typer>=0.27`, `sortedcontainers>=2.4`, `httpx>=0.28`.
 Groups: `dev` = `pytest>=9.1`, `hypothesis>=6.169`, `pytest-asyncio`, `ruff>=0.17`, `mypy>=2.4` (+ stubs as needed); `orchestration` = `dagster>=1.13.26,<2`, `dagster-webserver`; `dashboard` = `streamlit>=1.66`. `[tool.uv] default-groups = ["dev", "orchestration", "dashboard"]` so `uv sync --frozen` gives a full dev environment; Docker images sync only what they need.
 Only one agent per wave may change `pyproject.toml`/`uv.lock`.
+
+## 12. Amendments after Epic 1
+
+- **Per-symbol connection scope.** Each `connect` control record lists the normalized symbols the connection serves (`"symbols": [...]`). The processor makes a new connection authoritative only for those symbols and emits `reconnect` only for symbols that already had an authoritative connection. Recordings without the field fall back to the first connection that delivers a message for a symbol.
+- **QA failure conditions.** `tickvault qa` exits 1 when any venue/symbol/day has an unexplained anomaly or a missing book (messages but no venue snapshot). With `--date`, a `resync` within 300 s after midnight still explains a late anomaly of the previous day.
+- **Streaming replay.** The raw reader merges files lazily in canonical order, so replay memory is bounded by the number of open files, not the size of the raw tree.
+- **Layout of generated outputs.** Daily QA reports: `<data>/reports/qa-<date>.json|md`. Manifests: `<data>/manifests/date=<date>/manifest.json`. Bundled dashboard sample: `dashboard/sample/` (a data root).
+- **Pipeline module.** `tickvault/pipeline.py` provides `run_replay` and `run_live`; every CLI command is a thin wrapper over the pipeline or an Epic 1 function, and Dagster assets call the same functions.
