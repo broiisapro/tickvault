@@ -1,7 +1,10 @@
 """Typer command-line interface.
 
 Every command is a thin layer over the pipeline or an Epic 1 function, so the
-Dagster assets and the CLI share the same code paths.
+Dagster assets and the CLI share the same code paths. ``ingest`` configures
+stderr logging once (``--log-level``, default INFO) and reports progress every
+``--progress-interval`` seconds, so live runs are observable in
+``docker compose logs``.
 
 Exit codes: ``0`` on success, ``1`` on an unexpected error, ``2`` on invalid
 arguments, ``3`` when ``ingest --max-gb`` stopped because the data root grew
@@ -12,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import sys
 from collections.abc import Sequence
@@ -56,6 +60,25 @@ def _usage_error(message: str) -> NoReturn:
 
 def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _configure_logging(level: str) -> None:
+    """Configure stderr logging once, from the CLI only.
+
+    Library modules log through their own loggers and never configure
+    handlers; this is the single place that does, so ``ingest`` is observable
+    in container logs. The level is applied to the root logger even when
+    handlers already exist (for example under pytest), which keeps
+    ``--log-level`` effective inside the test harness.
+    """
+    resolved = logging.getLevelNamesMapping().get(level.upper())
+    if resolved is None:
+        _usage_error(f"unknown log level: {level!r}")
+    logging.basicConfig(
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger().setLevel(resolved)
 
 
 def _validate_venues(venues: str) -> list[str]:
@@ -138,13 +161,32 @@ def ingest(
         float | None,
         typer.Option("--max-gb", help="Stop ingesting when the data root grows past this size."),
     ] = None,
+    progress_interval: Annotated[
+        float,
+        typer.Option(
+            "--progress-interval",
+            help="Seconds between ingest progress log lines; 0 disables them.",
+        ),
+    ] = 10.0,
+    log_level: Annotated[
+        str,
+        typer.Option("--log-level", help="Stderr logging level, e.g. INFO or DEBUG."),
+    ] = "INFO",
 ) -> None:
     """Stream live venue data into the raw and normalized layers."""
+    _configure_logging(log_level)
     venue_list = _validate_venues(venues)
     symbol_list = _validate_symbols(symbols)
     try:
         stats = asyncio.run(
-            run_live(venue_list, symbol_list, out, duration=duration, max_gb=max_gb)
+            run_live(
+                venue_list,
+                symbol_list,
+                out,
+                duration=duration,
+                max_gb=max_gb,
+                progress_interval=progress_interval,
+            )
         )
     except KeyboardInterrupt:
         print("error: interrupted before the run could start", file=sys.stderr)
