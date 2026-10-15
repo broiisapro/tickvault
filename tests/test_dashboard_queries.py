@@ -9,13 +9,15 @@ so a broken query cannot pass vacuously.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 
 import duckdb
 import pytest
+import zstandard as zstd
 
 from dashboard import queries
 from tickvault.book.processor import BookProcessor, ProcessorOutput
@@ -23,7 +25,7 @@ from tickvault.models import NormalizedMessage, RawMessage
 from tickvault.normalize import coinbase as coinbase_normalizer
 from tickvault.normalize import kraken as kraken_normalizer
 from tickvault.qa.metrics import QARow
-from tickvault.rawio import iter_raw
+from tickvault.rawio import encode_line, iter_raw
 from tickvault.sql import connect, run_query
 from tickvault.storage.parquet_writer import ParquetWriter
 
@@ -117,6 +119,37 @@ def test_message_rate_matches_independent_count(dashboard_tree: Path) -> None:
     }
     assert actual == expected
     assert len(expected) > 1
+
+
+def test_kpi_window_is_relative_to_the_newest_data_not_the_wall_clock(
+    tmp_path: Path, coinbase_5m_path: Path
+) -> None:
+    """The messages/s KPI must count the newest data, however old it is.
+
+    The recorded fixture is rewritten onto a 2023 timestamp; a wall-clock
+    window would find nothing, while the newest-record window returns the
+    whole session.
+    """
+    messages = list(iter_raw(coinbase_5m_path))
+    target_start_ns = 1_700_000_000_000_000_000
+    shift_ns = messages[0].recv_ts_ns - target_start_ns
+    lines = b"".join(
+        encode_line(replace(message, recv_ts_ns=message.recv_ts_ns - shift_ns))
+        for message in messages
+    )
+    raw_path = tmp_path / "old-session.jsonl.zst"
+    raw_path.write_bytes(zstd.ZstdCompressor().compress(lines))
+    root = tmp_path / "root"
+    _replay(root, [raw_path])
+
+    newest_ns = max(message.recv_ts_ns for message in messages) - shift_ns
+    assert newest_ns < time.time_ns() - 30 * 24 * 3600 * 10**9
+    with _connection(root) as con:
+        kpi = queries.message_rate(con, window_seconds=300, bucket_seconds=60)
+    assert not kpi.empty
+    assert int(kpi["messages"].sum()) > 0
+    assert int(kpi["bucket"].min().value) > newest_ns - 360 * 10**9
+    assert int(kpi["bucket"].max().value) <= newest_ns
 
 
 def test_message_rate_window_is_anchored_to_the_newest_data(dashboard_tree: Path) -> None:
@@ -267,6 +300,35 @@ def test_dimensions_lists_replayed_markets(dashboard_tree: Path) -> None:
         ("coinbase", "BTC-USD"),
         ("kraken", "BTC-USD"),
     }
+
+
+def test_data_span_matches_an_independent_min_max(dashboard_tree: Path) -> None:
+    with _connection(dashboard_tree) as con:
+        span = queries.data_span(con)
+    assert list(span.columns) == ["first_ts_ns", "last_ts_ns"]
+    assert len(span) == 1
+    _, rows = run_query(
+        dashboard_tree,
+        """
+        SELECT min(ts), max(ts) FROM (
+            SELECT exchange_ts_ns AS ts FROM trades
+            UNION ALL SELECT exchange_ts_ns FROM book_deltas
+            UNION ALL SELECT exchange_ts_ns FROM book_snapshots
+            UNION ALL SELECT exchange_ts_ns FROM events WHERE exchange_ts_ns IS NOT NULL
+        )
+        """,
+    )
+    assert int(span["first_ts_ns"].iloc[0]) == rows[0][0]
+    assert int(span["last_ts_ns"].iloc[0]) == rows[0][1]
+
+
+def test_data_span_is_one_empty_row_on_an_empty_root(tmp_path: Path) -> None:
+    with _connection(tmp_path) as con:
+        span = queries.data_span(con)
+    assert list(span.columns) == ["first_ts_ns", "last_ts_ns"]
+    assert len(span) == 1
+    assert span["first_ts_ns"].isna().all()
+    assert span["last_ts_ns"].isna().all()
 
 
 def test_queries_on_empty_root_return_empty_frames(tmp_path: Path) -> None:
