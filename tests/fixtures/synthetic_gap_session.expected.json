@@ -17,7 +17,7 @@
       }
     },
     "kraken": {
-      "BTC/USD": {
+      "BTC-USD": {
         "gaps": 0,
         "checksum_failures": 1,
         "resyncs": 1,
@@ -53,7 +53,7 @@
     {
       "event_type": "checksum_failure",
       "venue": "kraken",
-      "symbol": "BTC/USD",
+      "symbol": "BTC-USD",
       "connection_id": "kraken-20261101T000000Z-0000beef",
       "ingest_seq": 35,
       "expected_seq": null,
@@ -62,7 +62,7 @@
     {
       "event_type": "resync",
       "venue": "kraken",
-      "symbol": "BTC/USD",
+      "symbol": "BTC-USD",
       "connection_id": "kraken-20261101T000000Z-0000beef",
       "ingest_seq": 39,
       "expected_seq": null,
@@ -70,8 +70,9 @@
     }
   ],
   "notes": [
+    "symbols are normalized to BASE-QUOTE after the normalizer: venue counts and events are keyed by the normalized symbol (the raw Kraken payloads keep the venue's BTC/USD, which appears here as BTC-USD).",
     "book_deltas_applied counts price levels committed to the live book; book_deltas_dropped counts levels in updates discarded while SYNCING.",
-    "the Coinbase update that exposes the sequence gap and the Kraken update whose checksum fails are validated and discarded, so their levels are counted as neither applied nor dropped.",
+    "anomaly-message accounting: the Coinbase update that exposes the sequence gap and the Kraken update whose checksum fails are validated and discarded, so their levels are counted as neither applied nor dropped.",
     "trades counts emitted trade rows from market_trades/trade update messages; trade snapshot backfills are not emitted.",
     "expected_seq/received_seq are null except for gap events.",
     "unexplained is 0: every anomaly is followed by a resync for the same (venue, symbol)."
