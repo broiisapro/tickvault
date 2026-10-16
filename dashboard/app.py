@@ -17,8 +17,10 @@ cheap) and caches every result with ``st.cache_data(ttl=10)``, so a live root
 refreshes once every ten seconds. All aggregation and row capping happen in
 SQL (:mod:`dashboard.queries`); the app never loads a whole table, never
 rebuilds a book and caps every chart series at ``_SERIES_ROWS`` newest points.
-With no data under the root it renders an explanatory empty state instead of
-failing.
+Time-axis charts are Altair specs from :mod:`dashboard.charts` with an
+explicit UTC scale, so a viewer in any time zone sees the same UTC ticks the
+axis labels promise. With no data under the root it renders an explanatory
+empty state instead of failing.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from dashboard import queries  # noqa: E402
+from dashboard import charts, queries  # noqa: E402
 from tickvault.sql import connect  # noqa: E402
 
 _ENV_DATA_ROOT = "TICKVAULT_DATA_DIR"
@@ -140,10 +142,6 @@ def _total(frame: pd.DataFrame, column: str) -> int:
     return 0 if frame.empty else int(frame[column].sum())
 
 
-def _series_key(frame: pd.DataFrame) -> pd.Series:
-    return frame["venue"] + " " + frame["symbol"]
-
-
 def _ns_to_timestamp(nanoseconds: int) -> pd.Timestamp:
     return pd.to_datetime(nanoseconds, utc=True)
 
@@ -238,15 +236,7 @@ def main() -> None:
     if rate.empty:
         st.info("No trades or book deltas in the last hour of data.")
     else:
-        st.line_chart(
-            rate,
-            x="bucket",
-            y="msgs_per_second",
-            color="venue",
-            x_label="Receive time (UTC)",
-            y_label="Messages/s",
-            height=320,
-        )
+        st.altair_chart(charts.message_rate_chart(rate), use_container_width=True)
 
     st.subheader("Events by venue")
     events = _load_event_counts(str(root), selected_venues_tuple)
@@ -260,50 +250,16 @@ def main() -> None:
     if book.empty:
         st.info("No sample snapshots for the selected venues and symbols.")
     else:
-        book_long = book.melt(
-            id_vars=["venue", "symbol", "ts"],
-            value_vars=["bid_price", "ask_price"],
-            var_name="side",
-            value_name="price",
-        )
-        book_long["series"] = _series_key(book_long) + " " + book_long["side"].str.removesuffix(
-            "_price"
-        )
-        st.line_chart(
-            book_long,
-            x="ts",
-            y="price",
-            color="series",
-            x_label="Exchange time (UTC)",
-            y_label="Price",
-            height=360,
-        )
+        st.altair_chart(charts.top_of_book_chart(book), use_container_width=True)
 
     st.subheader("Spread and mid")
     spread = _load_spread_mid(str(root), selected_venues_tuple, selected_symbols_tuple)
     if spread.empty:
         st.info("No sample snapshots for the selected venues and symbols.")
     else:
-        spread = spread.assign(series=_series_key(spread))
         left, right = st.columns(2)
-        left.line_chart(
-            spread,
-            x="ts",
-            y="mid",
-            color="series",
-            x_label="Exchange time (UTC)",
-            y_label="Mid price",
-            height=320,
-        )
-        right.line_chart(
-            spread,
-            x="ts",
-            y="spread_bps",
-            color="series",
-            x_label="Exchange time (UTC)",
-            y_label="Spread (bps)",
-            height=320,
-        )
+        left.altair_chart(charts.mid_price_chart(spread), use_container_width=True)
+        right.altair_chart(charts.spread_bps_chart(spread), use_container_width=True)
 
     st.subheader("QA history")
     if qa.empty:
