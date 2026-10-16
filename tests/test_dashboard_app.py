@@ -10,9 +10,11 @@ the cold-render budget on the real sample. Nothing here touches the network.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -135,6 +137,27 @@ def test_app_renders_with_data(
     assert tiles["Reconnects"] == "0"
     assert tiles["Unexplained"] == "0"
     assert float(tiles["Messages/s (last 5 min)"].replace(",", "")) > 0
+
+
+def test_app_renders_time_axes_with_a_utc_scale(
+    app_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rendered Vega-Lite specs pin every temporal x axis to UTC (#106)."""
+    app = _render(monkeypatch, app_root)
+    assert app.exception == []
+    specs: list[dict[str, Any]] = [
+        json.loads(chart.proto.spec) for chart in app.get("vega_lite_chart")
+    ]
+    assert len(specs) == 5
+    temporal = [
+        spec["encoding"]["x"]
+        for spec in specs
+        if spec["encoding"]["x"].get("type") == "temporal"
+    ]
+    assert len(temporal) == 4
+    for axis in temporal:
+        assert axis["scale"]["type"] == "utc"
+        assert axis["title"].endswith("(UTC)")
 
 
 def test_app_renders_on_empty_root(
