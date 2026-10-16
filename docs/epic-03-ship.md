@@ -45,7 +45,7 @@ the export of the `dashboard` dependency group (`make requirements`) and
 `tests/test_requirements_export.py` fails when the lockfile moves ahead of it.
 
 The sample root is the app's default data directory, so the hosted page needs
-no secrets and no network. Every time-axis chart is an Altair spec from
+no secrets and no outbound data feed. Every time-axis chart is an Altair spec from
 `dashboard/charts.py` with an explicit `alt.Scale(type="utc")` and a 24-hour
 `%H:%M` tick format, so the ticks read in UTC for every viewer; tooltips are
 preformatted in UTC as well.
@@ -67,11 +67,11 @@ while the repository was private.
 
 `.github/workflows/ci.yml` runs the three required jobs — `lint`, `types`,
 `tests` — on GitHub-hosted `ubuntu-24.04-arm` runners, each with
-`uv sync --frozen` and no network access to the venues (`-m "not network"` is
-the suite default). The jobs use the image's system CPython 3.12 (3.12.3)
-deliberately (A50). The self-hosted runners used while the repository was
-private were deregistered before the visibility change, and Docker stays out
-of CI (A34): the Compose stack and its health check are verified locally.
+`uv sync --frozen`; the suite's default `-m "not network"` keeps every check
+offline. The jobs use the image's system CPython 3.12 (3.12.3) deliberately
+(A50). The self-hosted runners used while the repository was private were
+deregistered at the ship gate, and Docker stays out of CI (A34): the Compose
+stack and its health check are verified locally.
 
 ### Engineering carryover
 
