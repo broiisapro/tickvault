@@ -13,11 +13,11 @@ TickVault streams level-2 order books and trades from Coinbase and Kraken, store
 
 ## What it demonstrates
 
-- **Immutable raw capture with replay.** Every websocket frame is persisted first (zstd JSONL, write-once) with its receive timestamp, connection id and ingest sequence; replay reads the same bytes through the same normalizer → book → writer path.
+- **Immutable raw capture with replay.** Every websocket frame is persisted first (zstd JSONL, write-once) with its receive timestamp, connection id and ingest sequence; replay reads the same bytes through the same normalizer → book → writer path, and no command ever rewrites a raw file (`test_raw_files_unchanged_after_all_commands`).
 - **Per-connection sequence-gap detection.** Coinbase Advanced Trade's `sequence_num` is tracked on every message; one missing number emits a `gap` event, moves the symbol to SYNCING and requests a fresh snapshot (`test_single_missing_sequence_is_flagged_and_resynced`); a stale delta from the previous connection is never applied after a resync (`test_no_pre_reconnect_delta_applied_after_resync`).
 - **Kraken CRC32 checksum on every book update**, computed from the exact decimal strings. Parsing Kraken's JSON numbers as floats loses trailing zeros (`0.00006120` becomes `6.12e-05`) and the checksum fails — verified against the live feed (`test_checksum_matches_reference_vectors`).
 - **Book invariants** after every applied update: crossed book, negative size, duplicate level (`test_crossed_book_is_flagged`, `test_invariant_violation_flags_resync_and_syncing`).
-- **Deterministic replay:** two replays of the same raw input produce byte-identical Parquet (`test_iso8601_and_rfc3339_parse_to_same_ns`, `test_raw_files_unchanged_after_all_commands`).
+- **Deterministic replay:** two replays of the same raw input produce byte-identical Parquet (`test_two_replays_are_byte_identical`, `test_replay_twice_produces_identical_trees`).
 - **QA that fails loudly:** `tickvault qa` exits 1 on any unexplained anomaly or missing book, and writes JSON + Markdown reports per day.
 - **Tardis.dev reconciliation** of trades by `trade_id`, fixture-tested; the fixture carries deliberate discrepancies that the report must find.
 
@@ -35,7 +35,7 @@ the live message rate is set by the venues.
 | Receive lag p50 / p99 | Coinbase 65.7–129.2 / 405.3–23,004.9 ms · Kraken 68.4–68.6 / 190.8–197.6 ms (per symbol; the 23 s p99 is reconnect catch-up) |
 | Replay throughput (`tickvault bench`, three runs) | 9.6–10.2k msg/s overall — Coinbase 2.3–2.4k, Kraken 7.3–7.7k; peak RSS 223 MB |
 | Live message rate (BTC-USD + ETH-USD, both venues) | ≈ 265 msg/s (476,965 messages / 1,800 s) |
-| Test suite | 427 tests |
+| Test suite | 448 tests |
 
 ## Architecture
 
@@ -93,7 +93,7 @@ raw/venue=<v>/date=<YYYY-MM-DD>/hour=<HH>/<connection_id>-<rot:05d>.jsonl.zst
 norm/<table>/venue=<v>/date=<YYYY-MM-DD>/hour=<HH>/part-<connection_id>-<first ingest_seq:012d>.parquet
 ```
 
-Four tables under `norm/`: `trades`, `book_deltas`, `book_snapshots` and `events` (plus `manifests/` and `reports/`). Prices and sizes are `decimal(38,18)`; timestamps are int64 nanoseconds UTC; every row carries `venue`, `symbol`, `exchange_ts_ns`, `recv_ts_ns`, `connection_id` and `ingest_seq`. See `docs/architecture.md` §5–7.
+Four tables under `norm/`: `trades`, `book_deltas`, `book_snapshots` and `events` (plus `manifests/` and `reports/`). Prices and sizes are `decimal(38,18)`; timestamps are int64 nanoseconds UTC parsed by one RFC 3339 parser for 0–9 fractional digits (`test_iso8601_and_rfc3339_parse_to_same_ns`); every row carries `venue`, `symbol`, `exchange_ts_ns`, `recv_ts_ns`, `connection_id` and `ingest_seq`. See `docs/architecture.md` §5–7.
 
 ## Testing and CI
 
@@ -103,6 +103,7 @@ Four tables under `norm/`: `trades`, `book_deltas`, `book_snapshots` and `events
 
 - Two venues (Coinbase, Kraken); reconciliation is fixture-tested against Coinbase only — Kraken and a real Tardis capture are deferred.
 - The hosted dashboard serves the fixed 30-minute sample, not a live feed.
+- The QA page (GitHub Pages) shows the report for the bundled sample; a daily report from always-on capture is Phase 3.
 - No always-on ingestion in Phase 1; the live Tardis reconciliation of a real capture is planned for 2026-11-01.
 
 ## Roadmap
