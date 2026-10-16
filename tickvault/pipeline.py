@@ -8,17 +8,21 @@ nothing to resynchronize.
 
 :func:`run_live` runs the venue connectors, persists every raw message to
 :class:`RawWriter` **before** it is normalized, and then processes it exactly
-like replay. It merges the connector streams through an
-:class:`asyncio.Queue`, routes every :class:`ResyncRequest` back to its venue's
-connector, flushes idle Parquet buffers once per second, and stops gracefully
-on ``duration``, on ``stop_event``, on SIGTERM/SIGINT, or when the data root
-grows past ``max_gb`` (measured from the writers' byte counters plus the data
-root's size once at start-up, never by walking the tree). It logs a start
-line, one progress line every ``progress_interval`` seconds and a final
+like replay. It merges the connector streams through a bounded
+:class:`asyncio.Queue` (``_LIVE_QUEUE_MAXSIZE``, so a slow consumer
+backpressures the connectors instead of growing memory), routes every
+:class:`ResyncRequest` back to its venue's connector, flushes idle Parquet
+buffers once per second, and stops gracefully on ``duration``, on
+``stop_event``, on SIGTERM/SIGINT, or when the data root grows past ``max_gb``
+(measured from the writers' byte counters plus the data root's size once at
+start-up, never by walking the tree). A set stop event always wins over a
+queued item, so a queue that never empties cannot delay a stop. It logs a
+start line, one progress line every ``progress_interval`` seconds and a final
 summary through the ``tickvault.pipeline`` logger; the library never
-configures logging itself. A graceful stop closes the connectors, waits for
-their streams to end, processes the remaining queued messages, and closes the
-raw and Parquet writers, so every file on disk is complete and readable.
+configures logging itself. A graceful stop closes the connectors, drains
+every message that already reached the queue through the raw writer and the
+processor, and closes the raw and Parquet writers, so every file on disk is
+complete and readable.
 
 Both entry points return the same frozen :class:`PipelineStats`.
 """
@@ -55,6 +59,9 @@ _LIVE_TICK_S = 1.0
 
 _LIVE_PROGRESS_S = 10.0
 """Default seconds between ``ingest progress`` log lines; 0 disables them."""
+
+_LIVE_QUEUE_MAXSIZE = 10_000
+"""Bound of the live merge queue; a slow consumer backpressures the connectors."""
 
 _NORMALIZERS: dict[str, Callable[[RawMessage], NormalizedMessage]] = {
     "coinbase": coinbase_normalize.normalize,
@@ -276,11 +283,17 @@ async def run_live(
     """Stream live venue data into the raw and normalized layers under ``out``.
 
     One connector per venue (``connector_factories``, the production connectors
-    by default) is built for ``symbols`` and merged through one queue. Every
-    message is written to the raw layer before it is normalized. The run stops
-    gracefully on ``duration`` seconds, on ``stop_event``, on SIGTERM/SIGINT,
-    or when the data root exceeds ``max_gb``; the returned stats'
-    ``stopped_by`` records which happened.
+    by default) is built for ``symbols`` and merged through one queue bounded
+    at ``_LIVE_QUEUE_MAXSIZE`` entries. Every message is written to the raw
+    layer before it is normalized. The run stops gracefully on ``duration``
+    seconds, on ``stop_event``, on SIGTERM/SIGINT, or when the data root
+    exceeds ``max_gb``; a set stop event is observed before another item is
+    taken, so a queue that never empties cannot delay the stop. The returned
+    stats' ``stopped_by`` records which happened.
+
+    On a stop the connectors are closed first (nothing new starts flowing),
+    then every message that already reached the queue is drained through the
+    raw writer and the processor, so no frame in the queue is lost.
 
     Logging goes through the ``tickvault.pipeline`` logger: a start line, one
     ``ingest progress`` line every ``progress_interval`` seconds (0 disables
@@ -309,7 +322,9 @@ async def run_live(
     raw_writer = RawWriter(out_path)
     parquet = ParquetWriter(out_path, idle_flush_s=_LIVE_IDLE_FLUSH_S)
     recorder = _Recorder(BookProcessor(), parquet)
-    queue: asyncio.Queue[tuple[Connector, RawMessage | None]] = asyncio.Queue()
+    queue: asyncio.Queue[tuple[Connector, RawMessage | None]] = asyncio.Queue(
+        maxsize=_LIVE_QUEUE_MAXSIZE
+    )
     producers = [asyncio.create_task(_pump(connector, queue)) for connector in connectors]
     started = time.monotonic()
     _LOGGER.info(
@@ -360,9 +375,14 @@ async def run_live(
             task.cancel()
         await asyncio.gather(*background, return_exceptions=True)
         await _close_connectors(connectors)
-        await asyncio.gather(*producers, return_exceptions=True)
-        while not queue.empty():
-            queue.get_nowait()
+        for producer in producers:
+            producer.cancel()
+        discarded = asyncio.ensure_future(_discard(queue))
+        try:
+            await asyncio.gather(*producers, return_exceptions=True)
+        finally:
+            discarded.cancel()
+            await asyncio.gather(discarded, return_exceptions=True)
         raw_writer.close()
         parquet.close()
     stats = recorder.stats("live", stopper.reason if stopper.reason is not None else "completed")
@@ -391,28 +411,57 @@ async def _pump(
 async def _next_or_stop(
     queue: asyncio.Queue[tuple[Connector, RawMessage | None]], stopper: _Stopper
 ) -> tuple[Connector, RawMessage | None] | None:
-    """Await the next queued item, or ``None`` once a stop has been requested."""
-    get_task: asyncio.Task[tuple[Connector, RawMessage | None]] = asyncio.ensure_future(
-        queue.get()
-    )
-    stop_task: asyncio.Task[bool] = asyncio.ensure_future(stopper.event.wait())
-    try:
-        done, _ = await asyncio.wait(
-            {get_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+    """Await the next queued item, or ``None`` once a stop has been requested.
+
+    A set stop event is observed before another item is taken: the event is
+    checked before every dequeue and wins even while the queue is never empty,
+    so ``duration``, signals and ``max_gb`` cannot be delayed by a busy feed.
+    Items are taken with ``get_nowait`` (no task pair per message); only an
+    empty queue falls back to waiting for an item and the stop event together.
+    One event-loop turn is yielded per item so the timer, signal and writer
+    tasks keep running while messages arrive faster than they are processed.
+    """
+    while True:
+        await asyncio.sleep(0)
+        if stopper.event.is_set():
+            if stopper.reason is None:
+                stopper.reason = "stop_event"
+            return None
+        try:
+            return queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        get_task: asyncio.Task[tuple[Connector, RawMessage | None]] = asyncio.ensure_future(
+            queue.get()
         )
-    except BaseException:
+        stop_task: asyncio.Task[bool] = asyncio.ensure_future(stopper.event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {get_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except BaseException:
+            get_task.cancel()
+            stop_task.cancel()
+            raise
+        if get_task in done:
+            stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
+            return get_task.result()
         get_task.cancel()
-        stop_task.cancel()
-        raise
-    if get_task in done:
-        stop_task.cancel()
-        await asyncio.gather(stop_task, return_exceptions=True)
-        return get_task.result()
-    get_task.cancel()
-    await asyncio.gather(get_task, return_exceptions=True)
-    if stopper.reason is None:
-        stopper.reason = "stop_event"
-    return None
+        await asyncio.gather(get_task, return_exceptions=True)
+        if stopper.reason is None:
+            stopper.reason = "stop_event"
+        return None
+
+
+async def _discard(queue: asyncio.Queue[tuple[Connector, RawMessage | None]]) -> None:
+    """Empty ``queue`` forever.
+
+    Used during shutdown so a producer cancelled while blocked on a full
+    queue can finish its final ``put`` instead of deadlocking the join.
+    """
+    while True:
+        await queue.get()
 
 
 async def _stop_after(seconds: float, stopper: _Stopper) -> None:

@@ -128,6 +128,42 @@ class FakeConnector:
                 await asyncio.sleep(self.delay)
 
 
+class FastConnector:
+    """A valid Coinbase l2 session yielded as fast as the consumer takes it.
+
+    ``yielded`` counts the messages the generator handed to the pipeline and
+    ``yielded_at_close`` freezes that count when :meth:`close` runs, which is
+    the set of frames the pipeline must persist during a graceful stop.
+    """
+
+    def __init__(self, venue: str = "coinbase") -> None:
+        self.venue = venue
+        self.symbols: tuple[str, ...] = ()
+        self.closed = False
+        self.yielded = 0
+        self.yielded_at_close: int | None = None
+
+    async def subscribe(self, symbols: Sequence[str]) -> None:
+        self.symbols = tuple(symbols)
+
+    async def resync(self, symbol: str, reason: str) -> None:
+        return None
+
+    async def close(self) -> None:
+        self.closed = True
+        if self.yielded_at_close is None:
+            self.yielded_at_close = self.yielded
+
+    async def stream(self) -> AsyncIterator[RawMessage]:
+        sequence = 1
+        recv_ts_ns = _BASE_NS
+        while not self.closed:
+            self.yielded += 1
+            yield _coinbase_message(sequence, recv_ts_ns, "fast-connector")
+            sequence += 1
+            recv_ts_ns += 1_000_000
+
+
 def _factory(connector: Connector) -> Callable[[Sequence[str]], Connector]:
     def build(symbols: Sequence[str]) -> Connector:
         connector.symbols = tuple(symbols)
@@ -281,6 +317,169 @@ async def test_max_gb_uses_writer_counters_without_walking_the_tree(
 
     assert stats.stopped_by == "max_gb"
     assert connector.closed
+
+
+async def test_duration_stops_a_queue_that_never_empties(tmp_path: Path) -> None:
+    """A feed faster than the consumer must not delay ``--duration`` (#105)."""
+    connector = FastConnector()
+    out = tmp_path / "data"
+
+    started = time.monotonic()
+    stats = await asyncio.wait_for(
+        run_live(
+            ["coinbase"],
+            ["BTC-USD"],
+            out,
+            duration=0.2,
+            connector_factories={"coinbase": _factory(connector)},
+            progress_interval=0,
+        ),
+        timeout=2.0,
+    )
+    elapsed = time.monotonic() - started
+
+    assert stats.stopped_by == "duration"
+    assert connector.closed
+    assert 0.2 <= elapsed < 2.0
+    assert stats.raw_lines > 0
+    assert list(iter_raw(out))
+
+
+async def test_stop_event_wins_over_a_queue_that_never_empties(tmp_path: Path) -> None:
+    """A set stop event must be observed before another item is taken (#105)."""
+    connector = FastConnector()
+    out = tmp_path / "data"
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        run_live(
+            ["coinbase"],
+            ["BTC-USD"],
+            out,
+            connector_factories={"coinbase": _factory(connector)},
+            stop_event=stop_event,
+            progress_interval=0,
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not task.done()
+
+    stop_event.set()
+    started = time.monotonic()
+    stats = await asyncio.wait_for(task, timeout=2.0)
+    elapsed = time.monotonic() - started
+
+    assert stats.stopped_by == "stop_event"
+    assert connector.closed
+    assert elapsed < 2.0
+    assert list(iter_raw(out))
+
+
+async def test_max_gb_stops_a_queue_that_never_empties(tmp_path: Path) -> None:
+    """The byte guard must not be delayed by a queue that never empties (#105)."""
+    connector = FastConnector()
+    out = tmp_path / "data"
+
+    stats = await asyncio.wait_for(
+        run_live(
+            ["coinbase"],
+            ["BTC-USD"],
+            out,
+            max_gb=1e-9,
+            connector_factories={"coinbase": _factory(connector)},
+            progress_interval=0,
+        ),
+        timeout=5.0,
+    )
+
+    assert stats.stopped_by == "max_gb"
+    assert connector.closed
+    assert list(iter_raw(out))
+
+
+async def test_graceful_stop_persists_every_frame_reaching_the_queue(
+    tmp_path: Path,
+) -> None:
+    """Nothing dequeued before the stop is lost: raw lines == frames yielded (#105)."""
+    connector = FastConnector()
+    out = tmp_path / "data"
+
+    stats = await asyncio.wait_for(
+        run_live(
+            ["coinbase"],
+            ["BTC-USD"],
+            out,
+            duration=0.2,
+            connector_factories={"coinbase": _factory(connector)},
+            progress_interval=0,
+        ),
+        timeout=5.0,
+    )
+
+    assert stats.stopped_by == "duration"
+    assert connector.yielded_at_close is not None
+    raw_messages = list(iter_raw(out))
+    assert len(raw_messages) == stats.raw_lines
+    assert stats.raw_lines == connector.yielded_at_close
+
+
+async def test_merge_queue_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The merge queue is created with ``_LIVE_QUEUE_MAXSIZE`` and never exceeds it."""
+    import tickvault.pipeline as pipeline_module
+
+    created: list[asyncio.Queue[tuple[Connector, RawMessage | None]]] = []
+
+    class RecordingQueue(asyncio.Queue[tuple[Connector, RawMessage | None]]):
+        """An ``asyncio.Queue`` that records its high-water mark."""
+
+        def __init__(self, maxsize: int = 0) -> None:
+            super().__init__(maxsize)
+            self.high_water = 0
+            created.append(self)
+
+        def _observe(self) -> None:
+            self.high_water = max(self.high_water, self.qsize())
+
+        def put_nowait(self, item: tuple[Connector, RawMessage | None]) -> None:
+            super().put_nowait(item)
+            self._observe()
+
+        async def put(self, item: tuple[Connector, RawMessage | None]) -> None:
+            await super().put(item)
+            self._observe()
+
+        def get_nowait(self) -> tuple[Connector, RawMessage | None]:
+            item = super().get_nowait()
+            self._observe()
+            return item
+
+        async def get(self) -> tuple[Connector, RawMessage | None]:
+            item = await super().get()
+            self._observe()
+            return item
+
+    monkeypatch.setattr(pipeline_module, "_LIVE_QUEUE_MAXSIZE", 8)
+    monkeypatch.setattr(pipeline_module.asyncio, "Queue", RecordingQueue)
+    connector = FastConnector()
+    out = tmp_path / "data"
+
+    stats = await asyncio.wait_for(
+        run_live(
+            ["coinbase"],
+            ["BTC-USD"],
+            out,
+            duration=0.2,
+            connector_factories={"coinbase": _factory(connector)},
+            progress_interval=0,
+        ),
+        timeout=5.0,
+    )
+
+    assert stats.stopped_by == "duration"
+    assert len(created) == 1
+    merge_queue = created[0]
+    assert merge_queue.maxsize == 8
+    assert merge_queue.high_water <= 8
+    assert connector.yielded > 8
 
 
 async def test_live_logs_start_progress_and_summary(
