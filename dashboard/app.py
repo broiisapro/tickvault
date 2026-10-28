@@ -7,8 +7,8 @@ sample::
 
 The header says what TickVault is, links the source and describes the current
 data root in one caption: the bundled sample's venues, symbols and UTC span
-(computed from the data, never hard-coded) or the live path when
-``TICKVAULT_DATA_DIR`` is set. The bundled sample is always named by its
+(computed from the data, never hard-coded), or the configured path for any
+other root. The bundled sample is always named by its
 repository-relative path (``dashboard/sample``), never by an absolute path --
 including when ``TICKVAULT_DATA_DIR`` points at it -- so the hosted app does
 not leak the container's mount path. Every time window -- including the

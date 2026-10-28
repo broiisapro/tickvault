@@ -135,19 +135,24 @@ def _write_three_venue_root(root: Path) -> None:
     the check below makes that link explicit, and ``ParquetWriter`` owns the
     partitioning and file naming.
     """
+    schemas: dict[str, pa.Schema] = {}
     writer = ParquetWriter(root)
     try:
         for offset, venue in enumerate(_VENUES):
             for table, records in _records(venue, offset).items():
                 expected = to_arrow(table, records)
                 assert expected.column_names == [field.name for field in TABLES[table]]
+                schemas[table] = expected.schema
                 writer.write(table, records)
     finally:
         writer.close()
     for venue in _VENUES:
-        files = sorted((root / "norm").rglob(f"venue={venue}/**/*.parquet"))
-        assert files
-        assert pq.read_table(files[0]).num_rows > 0
+        for table, schema in schemas.items():
+            files = sorted((root / "norm" / table).rglob(f"venue={venue}/**/*.parquet"))
+            assert files
+            written = pq.read_table(files[0])
+            assert written.schema == schema
+            assert written.num_rows > 0
 
 
 @pytest.fixture(scope="module")
@@ -204,6 +209,7 @@ def test_default_root_is_labelled_as_the_bundled_sample(
     caption = sample_captions[0]
     assert _SAMPLE_LABEL in caption
     assert str(_SAMPLE) not in caption
+    assert f"Showing the bundled sample from `{_SAMPLE_LABEL}`." in _captions(app)
     assert any("bundled sample" in c.lower() for c in _captions(app))
 
 
@@ -216,6 +222,7 @@ def test_env_root_pointing_at_the_sample_is_labelled_the_same_way(
     sample_captions = [c for c in _captions(app) if c.startswith("Bundled sample:")]
     assert len(sample_captions) == 1
     assert _SAMPLE_LABEL in sample_captions[0]
+    assert f"Showing the bundled sample from `{_SAMPLE_LABEL}`." in _captions(app)
     for text in [*_captions(app), *(block.value for block in app.markdown)]:
         assert str(_SAMPLE) not in text
     assert any("bundled sample" in c.lower() for c in _captions(app))
