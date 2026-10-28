@@ -104,7 +104,8 @@ def compute_features(
     """Compute the ``FEATURES_SCHEMA`` bars for ``date`` under ``data_root``.
 
     One table per resolution label in ``resolutions``, each holding every
-    venue/symbol of that day, sorted by ``(symbol, bar_start_ns)``.
+    venue/symbol of that day, sorted by ``(symbol, bar_start_ns)`` — and, with
+    more than one venue present, by ``(venue, symbol, bar_start_ns)``.
     """
     iso_date = _iso_date(date)
     widths = [_resolution_width(label) for label in resolutions]
@@ -217,15 +218,17 @@ def _sql_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _query(files: Sequence[Path], sql: str) -> list[tuple[object, ...]]:
+def _query(files: Sequence[Path], sql: str, **parameters: object) -> list[tuple[object, ...]]:
     """Run ``sql`` against ``files`` on a fresh in-memory DuckDB connection.
 
     ``sql`` contains a ``{source}`` placeholder that expands to the file list,
-    so only the files of the requested day are opened.
+    so only the files of the requested day are opened; ``parameters`` expand
+    the remaining named placeholders.
     """
     connection = duckdb.connect()
     try:
-        return connection.execute(sql.format(source=_source_list(files))).fetchall()
+        query = sql.format(source=_source_list(files), **parameters)
+        return connection.execute(query).fetchall()
     finally:
         connection.close()
 
@@ -241,13 +244,16 @@ def _read_samples(root: Path, iso_date: str) -> dict[tuple[str, str], list[_Book
         SELECT venue, symbol, exchange_ts_ns,
                max(CASE WHEN side = 'bid' AND level = 0 THEN price END) AS best_bid,
                max(CASE WHEN side = 'ask' AND level = 0 THEN price END) AS best_ask,
-               coalesce(sum(CASE WHEN side = 'bid' AND level < 5 THEN size END), 0) AS bid_size_5,
-               coalesce(sum(CASE WHEN side = 'ask' AND level < 5 THEN size END), 0) AS ask_size_5
+               coalesce(sum(CASE WHEN side = 'bid' AND level < {levels} THEN size END), 0)
+                   AS bid_size_5,
+               coalesce(sum(CASE WHEN side = 'ask' AND level < {levels} THEN size END), 0)
+                   AS ask_size_5
         FROM read_parquet({source})
         WHERE source = 'sample'
         GROUP BY venue, symbol, exchange_ts_ns, snapshot_id
         ORDER BY venue, symbol, exchange_ts_ns, snapshot_id
         """,
+        levels=_IMBALANCE_LEVELS,
     )
     samples: dict[tuple[str, str], list[_BookSample]] = {}
     for venue, symbol, exchange_ts_ns, best_bid, best_ask, bid_size_5, ask_size_5 in rows:
