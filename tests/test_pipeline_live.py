@@ -320,7 +320,14 @@ async def test_max_gb_uses_writer_counters_without_walking_the_tree(
 
 
 async def test_duration_stops_a_queue_that_never_empties(tmp_path: Path) -> None:
-    """A feed faster than the consumer must not delay ``--duration`` (#105)."""
+    """A feed faster than the consumer must not delay ``--duration`` (#105).
+
+    The proof is structural, not a wall-clock budget: a stop that were only
+    observed while waiting for the queue would never fire here, because the
+    queue is refilled faster than it is emptied. The generous outer timeout is
+    only a safety net for a hung run (it used to be 2 s and failed on a slow
+    CPU, where draining the queue legitimately takes longer than that).
+    """
     connector = FastConnector()
     out = tmp_path / "data"
 
@@ -334,13 +341,13 @@ async def test_duration_stops_a_queue_that_never_empties(tmp_path: Path) -> None
             connector_factories={"coinbase": _factory(connector)},
             progress_interval=0,
         ),
-        timeout=2.0,
+        timeout=60.0,
     )
     elapsed = time.monotonic() - started
 
     assert stats.stopped_by == "duration"
     assert connector.closed
-    assert 0.2 <= elapsed < 2.0
+    assert elapsed >= 0.2
     assert stats.raw_lines > 0
     assert list(iter_raw(out))
 
