@@ -144,11 +144,13 @@ PY
 }
 
 check_qa() {
-    if ((qa_status == 0)); then
-        pass "tickvault qa --data /data exited 0"
-    else
+    if ((qa_status != 0)); then
         printf '%s\n' "$qa_output"
         fail "tickvault qa --data /data exited ${qa_status}"
+    elif ((data_ok == 0)); then
+        fail "tickvault qa --data /data exited 0, but no raw or normalized data was written"
+    else
+        pass "tickvault qa --data /data exited 0"
     fi
 }
 
@@ -175,7 +177,9 @@ check_metrics() {
 echo "== make demo-buffer =="
 make demo-buffer
 
+data_ok=0
 if wait_for_partitions "first raw and normalized data" "$DATA_TIMEOUT"; then
+    data_ok=1
     pass "the writer produced raw and normalized data"
 else
     fail "the writer never produced raw and normalized data"
