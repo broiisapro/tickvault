@@ -4,9 +4,10 @@ Three kinds of vector pin the implementation:
 
 * the venue's documented example, which also shows how a book with fewer than
   25 levels per side is rendered (only the levels that exist, no placeholders);
-* live vectors from the committed five-minute fixture: the book right after the
-  subscription snapshot and after two later update batches, each compared with
-  the ``cs`` value the venue sent for that exact state;
+* live vectors from the committed five-minute fixture: the venue's first
+  checksummed state (the subscription snapshot plus the first batch of updates)
+  and two later update batches, each compared with the ``cs`` value the venue
+  sent for that exact state;
 * ``js_number`` cases checked against ``Number.prototype.toString`` in a
   JavaScript engine, because the venue hashes the digits JavaScript prints and
   Python's ``repr`` disagrees on exponent form (``1e-07``) and trailing zeros.
