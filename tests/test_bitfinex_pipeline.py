@@ -152,3 +152,6 @@ def test_default_registry_verifies_a_bitfinex_checksum() -> None:
     output = processor.process(normalize(_raw(checksum, 3)))
 
     assert [event.event_type for event in output.events] == ["checksum_failure"]
+
+    disconnect = json.dumps({"event": "disconnect", "reason": "test_done"})
+    processor.process(normalize(_raw(disconnect, 4, kind="control")))
