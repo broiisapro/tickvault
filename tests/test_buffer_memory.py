@@ -178,9 +178,13 @@ def test_open_buffer_memory_addresses_share_one_named_broker() -> None:
     assert other.broker is not first.broker
 
 
-def test_open_buffer_kafka_address_reports_the_documented_error() -> None:
-    with pytest.raises(RuntimeError, match="Kafka buffer not available yet"):
-        open_buffer("127.0.0.1:9092")
+def test_open_buffer_host_port_returns_the_kafka_buffer() -> None:
+    from tickvault.buffer_kafka import KafkaBuffer
+
+    buffer = open_buffer("127.0.0.1:9092")
+
+    # Constructing a buffer must not contact the broker; only start() does.
+    assert isinstance(buffer, KafkaBuffer)
 
 
 @pytest.mark.parametrize("address", ["", "memory://", "broker", "broker:port", "http://x:1"])
