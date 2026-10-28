@@ -1,10 +1,12 @@
 """Dagster daily job for TickVault.
 
-Three daily-partitioned assets run the same Epic 1 functions the CLI calls —
+Four daily-partitioned assets run the same Epic 1 functions the CLI calls —
 :func:`tickvault.storage.compact.compact` → :func:`tickvault.qa.report.run_qa`
 + :func:`tickvault.qa.report.write_reports` →
-:func:`tickvault.storage.manifest.write_manifest` — for one UTC day. The
-assets themselves contain no business logic.
+:func:`tickvault.storage.manifest.write_manifest`, plus the derived features
+table (:func:`tickvault.features.compute_features` →
+:func:`tickvault.features.write_features`) — for one UTC day. The assets
+themselves contain no business logic.
 
 The data root comes from the ``data_root`` resource, which defaults to
 ``$TICKVAULT_DATA_DIR`` and falls back to ``./data``.
@@ -17,6 +19,7 @@ from pathlib import Path
 import dagster as dg
 from pydantic import Field
 
+import tickvault.features
 from tickvault.qa.report import QAReport, run_qa, write_reports
 from tickvault.storage.compact import compact
 from tickvault.storage.manifest import write_manifest
@@ -94,6 +97,24 @@ def qa_report(
 
 @dg.asset(
     partitions_def=daily_partitions,
+    deps=[compacted_partitions],
+    description="Compute and write the 1s/1m features table of one UTC day.",
+)
+def features(
+    context: dg.AssetExecutionContext, data_root: DataRootResource
+) -> dg.MaterializeResult:
+    tables = tickvault.features.compute_features(data_root.path, context.partition_key)
+    paths = tickvault.features.write_features(tables, data_root.path, context.partition_key)
+    metadata: dict[str, object] = {
+        f"rows_{resolution}": table.num_rows
+        for resolution, table in sorted(tables.items())
+    }
+    metadata["files"] = len(paths)
+    return dg.MaterializeResult(metadata=metadata)
+
+
+@dg.asset(
+    partitions_def=daily_partitions,
     deps=[qa_report],
     description="Write the SHA-256 manifest of one UTC day's normalized files.",
 )
@@ -106,8 +127,8 @@ def manifest(
 
 daily_job = dg.define_asset_job(
     "daily_job",
-    selection=[compacted_partitions, qa_report, manifest],
-    description="Compact, report and manifest one UTC day of normalized data.",
+    selection=[compacted_partitions, qa_report, manifest, features],
+    description="Compact, report, manifest and featurize one UTC day of normalized data.",
 )
 
 
@@ -125,7 +146,7 @@ def daily_job_schedule(context: dg.ScheduleEvaluationContext) -> dg.RunRequest:
 
 
 defs = dg.Definitions(
-    assets=[compacted_partitions, qa_report, manifest],
+    assets=[compacted_partitions, qa_report, manifest, features],
     schedules=[daily_job_schedule],
     resources={"data_root": DataRootResource()},
 )
