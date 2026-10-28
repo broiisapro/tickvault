@@ -47,7 +47,7 @@
         {
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
-          "expr": "sum by (venue) (rate(tickvault_messages_total[1m]))",
+          "expr": "sum by (venue) (rate(tickvault_messages_total{job=\"ingester\"}[1m]))",
           "legendFormat": "{{venue}}",
           "range": true
         }
@@ -96,7 +96,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "Data-quality events/s by type",
-      "description": "tickvault_events_total: gaps, resyncs, checksum failures, invariant violations, reconnects and disconnects.",
+      "description": "tickvault_events_total: gaps, resyncs, checksum failures, invariant violations, reconnects and disconnects. A single \"none\" line at zero means no event of any type has been recorded since the process started.",
       "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "fieldConfig": {
@@ -125,7 +125,7 @@
         {
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
-          "expr": "sum by (venue, event_type) (rate(tickvault_events_total[1m]))",
+          "expr": "sum by (venue, event_type) (rate(tickvault_events_total[1m])) or on() label_replace(vector(0), \"event_type\", \"none\", \"\", \"\")",
           "legendFormat": "{{venue}} {{event_type}}",
           "range": true
         }
@@ -204,7 +204,7 @@
         {
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
-          "expr": "tickvault_last_message_age_seconds",
+          "expr": "tickvault_last_message_age_seconds{job=\"ingester\"}",
           "legendFormat": "{{venue}}",
           "range": true
         }
@@ -243,7 +243,7 @@
         {
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
-          "expr": "tickvault_buffer_lag_messages",
+          "expr": "tickvault_buffer_lag_messages{job=\"writer\"}",
           "legendFormat": "lag",
           "range": true
         }
@@ -282,7 +282,7 @@
         {
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
-          "expr": "rate(tickvault_buffer_consumed_total[1m])",
+          "expr": "rate(tickvault_buffer_consumed_total{job=\"writer\"}[1m])",
           "legendFormat": "consumed",
           "range": true
         }
