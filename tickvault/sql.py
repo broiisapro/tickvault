@@ -13,6 +13,14 @@ table without any file gets a typed zero-row view built from the Arrow schema
 in :mod:`tickvault.models` (table columns in schema order, then ``date`` and
 ``hour``, matching the column order of the populated views). ``SELECT ... FROM
 <table>`` therefore never errors on a fresh data directory.
+
+The derived features tree (decision A68) is optional and read-only: when
+``<root>/features/`` holds Parquet files, one extra ``features`` view is
+created over ``<root>/features/**/*.parquet`` with the hive keys pinned
+(``resolution`` and ``venue`` ``VARCHAR``, ``date`` ``DATE``). When it holds
+none, no ``features`` view is created and the four normalized views' DDL is
+byte-identical to the pre-features text. A root with only ``features/`` works
+too: the four normalized views are then the typed zero-row ones.
 """
 
 from __future__ import annotations
@@ -25,20 +33,23 @@ import pyarrow as pa
 from tickvault.models import TABLES
 
 _HIVE_TYPES = "{'venue': 'VARCHAR', 'date': 'DATE', 'hour': 'INTEGER'}"
+_FEATURES_HIVE_TYPES = "{'resolution': 'VARCHAR', 'venue': 'VARCHAR', 'date': 'DATE'}"
 
 
 def view_ddl(root: str | Path) -> str:
-    """Return the ``CREATE VIEW`` statements for ``root``, one per table.
+    """Return the ``CREATE VIEW`` statements for ``root``.
 
-    The text is a pure function of the data tree: a table with files gets the
-    ``read_parquet`` statement, a table without files the typed empty-view
-    statement.
+    One statement per normalized table (``tickvault.models.TABLES``), plus the
+    optional ``features`` view. The text is a pure function of the data tree: a
+    table with files gets the ``read_parquet`` statement, a table without files
+    the typed empty-view statement. The ``features`` view is appended only when
+    the features tree holds files.
     """
     return "\n".join(_view_statements(root)) + "\n"
 
 
 def connect(root: str | Path) -> duckdb.DuckDBPyConnection:
-    """Open an in-memory DuckDB connection with the four views created."""
+    """Open an in-memory DuckDB connection with the views created."""
     connection = duckdb.connect()
     for statement in _view_statements(root):
         connection.execute(statement)
@@ -61,7 +72,29 @@ def run_query(root: str | Path, sql: str) -> tuple[list[str], list[tuple[object,
 
 def _view_statements(root: str | Path) -> list[str]:
     root_path = Path(root)
-    return [_create_view(root_path, table) for table in TABLES]
+    statements = [_create_view(root_path, table) for table in TABLES]
+    features_statement = _create_features_view(root_path)
+    if features_statement is not None:
+        statements.append(features_statement)
+    return statements
+
+
+def _create_features_view(root: Path) -> str | None:
+    """Return the features view statement, or ``None`` without a features tree.
+
+    The tree follows the A68 layout
+    (``features/resolution=<r>/venue=<v>/date=<D>/part-<symbol>.parquet``), so
+    all three hive keys exist below ``features/``.
+    """
+    directory = root / "features"
+    if not any(directory.rglob("*.parquet")):
+        return None
+    pattern = (directory / "**" / "*.parquet").as_posix()
+    return (
+        "CREATE VIEW features AS SELECT * FROM "
+        f"read_parquet({_sql_quote(pattern)}, hive_partitioning = true, "
+        f"hive_types = {_FEATURES_HIVE_TYPES});"
+    )
 
 
 def _create_view(root: Path, table: str) -> str:
