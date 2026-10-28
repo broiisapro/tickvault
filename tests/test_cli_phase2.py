@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 from pathlib import Path
 
@@ -10,9 +12,12 @@ import pytest
 from typer.testing import CliRunner
 
 import tickvault.cli as cli
+from tickvault.buffer import open_buffer
 from tickvault.cli import app
 from tickvault.features import features_path
+from tickvault.models import RawMessage
 from tickvault.pipeline import PipelineStats
+from tickvault.rawio import encode_line, iter_raw
 from tickvault.verify import VerifyReport
 
 runner = CliRunner()
@@ -89,8 +94,19 @@ def test_ingest_help_names_both_environment_variables() -> None:
     assert "TICKVAULT_METRICS_PORT" in output
 
 
-def test_ingest_buffer_option_reaches_the_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ingest_buffer_option_reaches_the_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--buffer`` is opened and handed to ``run_live`` instead of writing locally."""
     monkeypatch.delenv("TICKVAULT_BUFFER", raising=False)
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(cli, "run_live", _stub_run_live(calls))
+    opened: list[str] = []
+    sentinel = object()
+
+    def fake_open_buffer(address: str) -> object:
+        opened.append(address)
+        return sentinel
+
+    monkeypatch.setattr(cli, "open_buffer", fake_open_buffer)
 
     result = runner.invoke(
         app,
@@ -103,12 +119,13 @@ def test_ingest_buffer_option_reaches_the_stub(monkeypatch: pytest.MonkeyPatch) 
             "--out",
             "data",
             "--buffer",
-            "memory://cli-stub",
+            "memory://cli-buffer",
         ],
     )
 
-    assert result.exit_code == 1
-    assert "error: buffered ingest: implemented in wave 08" in result.stderr
+    assert result.exit_code == 0, result.output
+    assert opened == ["memory://cli-buffer"]
+    assert calls["kwargs"]["buffer"] is sentinel  # type: ignore[index]
 
 
 def test_ingest_reads_the_buffer_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -264,14 +281,58 @@ def test_ingest_rejects_an_unparseable_buffer_address(monkeypatch: pytest.Monkey
     assert "error: buffer address must be HOST:PORT or memory://NAME" in result.stderr
 
 
-def test_consume_reaches_the_writer_stub() -> None:
+def test_consume_writes_a_buffered_record(tmp_path: Path) -> None:
+    """``consume`` is the real writer now: it writes what the buffer holds."""
+    address = "memory://cli-consume"
+    publisher = open_buffer(address)
+    message = RawMessage(
+        venue="coinbase",
+        connection_id="coinbase-cli-consume",
+        ingest_seq=0,
+        recv_ts_ns=1_793_491_200_000_000_000,
+        kind="msg",
+        payload=json.dumps(
+            {
+                "channel": "l2_data",
+                "timestamp": "2026-11-01T00:00:00.000000000Z",
+                "sequence_num": 1,
+                "events": [
+                    {
+                        "type": "snapshot",
+                        "product_id": "BTC-USD",
+                        "updates": [
+                            {
+                                "side": "bid",
+                                "event_time": "2026-11-01T00:00:00.000000000Z",
+                                "price_level": "81199.9",
+                                "new_quantity": "0.5",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+    )
+    asyncio.run(publisher.start())
+    asyncio.run(publisher.publish_raw(encode_line(message)))
+    out = tmp_path / "data"
+
     result = runner.invoke(
         app,
-        ["consume", "--buffer", "memory://consume-stub", "--out", "data"],
+        [
+            "consume",
+            "--buffer",
+            address,
+            "--out",
+            str(out),
+            "--duration",
+            "0.2",
+        ],
     )
 
-    assert result.exit_code == 1
-    assert "error: writer: implemented in wave 08" in result.stderr
+    assert result.exit_code == 0, result.stderr
+    assert "writer stopped: duration" in result.output
+    assert list(iter_raw(out)) == [message]
 
 
 @pytest.mark.parametrize("arguments", [["--out", "data"], ["--buffer", "memory://x"]])
