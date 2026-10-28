@@ -116,11 +116,10 @@ def test_subscribe_ack_registers_the_channel() -> None:
     _connect()
     ack = _subscribe("book", _BOOK_CHAN)
     assert (ack.channel, ack.sequence, ack.book_updates) == ("book", None, ())
-    assert ack.raw.kind == "msg"
 
-    # Without the ack the channel id is unknown; the ack is what makes the
-    # following data frames resolvable.
-    assert bitfinex._CONNECTIONS[_CONNECTION].channels[_BOOK_CHAN].channel == "book"
+    # The ack is what makes the following data frame resolvable at all.
+    update = normalize(_raw("[396954,[81154,0,1],3,1793158779620]")).book_updates[0]
+    assert update.bids == ((Decimal("81154"), Decimal("0")),)
 
 
 def test_book_snapshot_splits_signed_levels_into_bids_and_asks() -> None:

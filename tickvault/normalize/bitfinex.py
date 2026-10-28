@@ -1,4 +1,4 @@
-"""Pure normalizer for the Bitfinex WS v2 public websocket feed.
+"""Normalizer for the Bitfinex WS v2 public websocket feed.
 
 Bitfinex v2 carries a per-connection sequence number on every frame (with the
 ``SEQ_ALL`` conf flag) and a CRC32 book checksum on ``cs`` frames (with
