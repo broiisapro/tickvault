@@ -22,12 +22,15 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
+from tickvault.book.bitfinex_checksum import bitfinex_checksum
 from tickvault.book.kraken_checksum import kraken_checksum
 from tickvault.book.processor import ChecksumFn
 from tickvault.connectors.base import Connector
+from tickvault.connectors.bitfinex import BitfinexConnector
 from tickvault.connectors.coinbase import CoinbaseConnector
 from tickvault.connectors.kraken import KrakenConnector
 from tickvault.models import NormalizedMessage, RawMessage
+from tickvault.normalize import bitfinex as bitfinex_normalize
 from tickvault.normalize import coinbase as coinbase_normalize
 from tickvault.normalize import kraken as kraken_normalize
 
@@ -68,8 +71,15 @@ VENUES: Mapping[str, VenueSpec] = {
         checksum=kraken_checksum,
         checksum_depth=25,
     ),
+    "bitfinex": VenueSpec(
+        name="bitfinex",
+        normalize=bitfinex_normalize.normalize,
+        connector=BitfinexConnector,
+        checksum=bitfinex_checksum,
+        checksum_depth=25,
+    ),
 }
-"""Every supported venue, in display order (Coinbase, then Kraken)."""
+"""Every supported venue, in display order (Coinbase, Kraken, then Bitfinex)."""
 
 
 def venue_names() -> tuple[str, ...]:
