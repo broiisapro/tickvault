@@ -233,9 +233,12 @@ File layout:
 - **1-second bar counts are not exactly 1,800.** The DoD expects about 1,800
   per venue/symbol; the actual range is 1,798–1,801 because each venue's
   30-minute capture starts and ends mid-second, so the first and last partial
-  seconds of the span differ by venue. Coverage of book state is 98.5 % for
-  Kraken's 1-second bars (the last partial second has no fresh sample) and
-  100 % for Coinbase's.
+  seconds of the span differ by venue. Coverage of book state is 100 % for
+  Coinbase's 1-second bars and 98.5 % for Kraken's: the sample's Kraken feed
+  drops at 17:28:57 and reconnects at 17:29:29, so the 27 bars from 17:29:02
+  to 17:29:28 are more than 5 s past the last sample and correctly have null
+  book columns. The final 1-minute bar closes 31 s after the last sample and
+  is null for the same reason.
 - **The end-to-end test compacts its replayed root before materializing the
   daily job.** The job's first asset compacts by design, so leaving the
   multi-file replay in place would make the "input trees unchanged" hash
