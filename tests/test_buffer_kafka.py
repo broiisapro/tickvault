@@ -102,6 +102,8 @@ class FakeConsumer:
         self.assigned: set[TopicPartition] = set()
         self.seeked: list[TopicPartition] = []
         self.commits: list[dict[TopicPartition, OffsetAndMetadata]] = []
+        self.end_queries: list[list[TopicPartition]] = []
+        self.end_offset: int | None = 0
         self.started = False
         self.stopped = False
         self._waiters: list[asyncio.Event] = []
@@ -122,6 +124,12 @@ class FakeConsumer:
 
     async def commit(self, offsets: dict[TopicPartition, OffsetAndMetadata]) -> None:
         self.commits.append(dict(offsets))
+
+    async def end_offsets(self, partitions: list[TopicPartition]) -> dict[TopicPartition, int]:
+        self.end_queries.append(list(partitions))
+        if self.end_offset is None:
+            return {}
+        return {partition: self.end_offset for partition in partitions}
 
     async def getone(self) -> FakeRecord:
         while True:
@@ -327,6 +335,32 @@ async def test_commit_rejects_a_negative_offset(fake_clients: None) -> None:
 
     assert _raw_consumer().commits == []
     await buffer.close()
+
+
+async def test_end_offset_queries_partition_zero(fake_clients: None) -> None:
+    buffer = KafkaBuffer("127.0.0.1:19092")
+    await buffer.start()
+    _raw_consumer().end_offset = 42
+
+    assert await buffer.end_offset() == 42
+    assert _raw_consumer().end_queries == [[RAW_PARTITION]]
+    await buffer.close()
+
+
+async def test_end_offset_is_none_when_the_broker_reports_no_offsets(
+    fake_clients: None,
+) -> None:
+    buffer = KafkaBuffer("127.0.0.1:19092")
+    await buffer.start()
+    _raw_consumer().end_offset = None
+
+    assert await buffer.end_offset() is None
+    await buffer.close()
+
+
+async def test_end_offset_before_start_raises() -> None:
+    with pytest.raises(RuntimeError, match="not started"):
+        await KafkaBuffer("127.0.0.1:19092").end_offset()
 
 
 async def test_consume_raw_keeps_order_and_offsets(fake_clients: None) -> None:

@@ -39,8 +39,8 @@ requests it produces to the control topic, and commits an offset only after
 the raw writer has flushed everything up to it. A writer restarted after a
 crash therefore replays the uncommitted tail instead of losing it; it drops the
 envelopes whose ``(connection_id, ingest_seq)`` it already wrote in that
-process, and asks the still-connected ingester for a fresh snapshot the first
-time a symbol has no LIVE book.
+process, asks the still-connected ingester for a fresh snapshot the first time
+a symbol has no LIVE book, and reports its backlog through the buffer-lag gauge.
 
 ``metrics`` is observability only: every ``None`` default leaves the Phase 1
 code path byte-identical.
@@ -710,6 +710,45 @@ async def _writer_tick(parquet: ParquetWriter, metrics: PipelineMetrics | None) 
             metrics.tick(time.time())
 
 
+async def _writer_lag_tick(
+    buffer: Buffer, metrics: PipelineMetrics, position: _ConsumePosition
+) -> None:
+    """Refresh the buffer-lag gauge once per live tick.
+
+    One second is the contract (decision A71 asks for a lag gauge the writer
+    feeds "at most once per second"), and a fresh ``end_offset`` per tick keeps
+    the request rate on the broker negligible next to the record traffic.
+    """
+    while True:
+        await asyncio.sleep(_LIVE_TICK_S)
+        await _refresh_buffer_lag(buffer, metrics, position)
+
+
+async def _refresh_buffer_lag(
+    buffer: Buffer, metrics: PipelineMetrics, position: _ConsumePosition
+) -> None:
+    """Set ``tickvault_buffer_lag_messages`` from the broker's end offset.
+
+    The gauge is ``end - next_to_consume``: records the ingester published that
+    this writer has not handled yet. Nothing is set before the writer has
+    handled its first record (it does not know where a resumed consumer starts)
+    nor when the buffer reports no end offset. A broker error is logged at debug
+    and swallowed, like every other metrics observation: a lag query must never
+    stop a writer that is otherwise making progress.
+    """
+    next_offset = position.next_offset
+    if next_offset is None:
+        return
+    try:
+        end = await buffer.end_offset()
+    except Exception:
+        _LOGGER.debug("could not read the buffer end offset", exc_info=True)
+        return
+    if end is None:
+        return
+    metrics.set_buffer_lag(max(end - next_offset, 0))
+
+
 class _EndOfRecords:
     """Queue sentinel: the buffer's raw iterator ended."""
 
@@ -802,6 +841,22 @@ class _ResumingRawWriter(RawWriter):
                 rotation += 1
 
 
+class _ConsumePosition:
+    """Where the writer has got to on the raw topic, for the lag gauge.
+
+    ``next_offset`` is the offset of the first raw record this writer has not
+    handled yet. It stays ``None`` until the writer has handled a record,
+    because a resumed writer only learns its starting position from the first
+    record the broker delivers (the committed offset is not part of the
+    :class:`Buffer` protocol).
+    """
+
+    __slots__ = ("next_offset",)
+
+    def __init__(self) -> None:
+        self.next_offset: int | None = None
+
+
 async def run_writer(
     buffer: Buffer,
     out: str | Path,
@@ -834,8 +889,12 @@ async def run_writer(
     writer is flushed, the last offset committed, and the writers and the buffer
     closed. An unexpected exception or cancellation closes the writers and the
     buffer without committing, so the next writer replays that tail.
-    ``metrics`` counts consumed records; a buffer-lag gauge is not fed because
-    the frozen :class:`Buffer` protocol exposes no end offset.
+
+    ``metrics`` counts consumed records and, at most once per second, sets
+    ``tickvault_buffer_lag_messages`` from :meth:`Buffer.end_offset` minus the
+    offset of the next record this writer has to handle. A buffer that cannot
+    report its end offset, or raises while doing so, leaves the gauge at its
+    previous value: the lag is observability and never fails the writer.
     """
     out_path = Path(out)
     stopper = _Stopper(stop_event if stop_event is not None else asyncio.Event())
@@ -849,6 +908,7 @@ async def run_writer(
         maxsize=_LIVE_QUEUE_MAXSIZE
     )
     pumped = asyncio.create_task(_pump_records(buffer.consume_raw(), queue))
+    position = _ConsumePosition()
     started = time.monotonic()
     written: set[tuple[str, int]] = set()
     resync_requested: set[tuple[str, str]] = set()
@@ -889,6 +949,11 @@ async def run_writer(
 
     _LOGGER.info("writer starting: out=%s", out_path)
     ticker = asyncio.create_task(_writer_tick(parquet, metrics))
+    lag = (
+        asyncio.create_task(_writer_lag_tick(buffer, metrics, position))
+        if metrics is not None
+        else None
+    )
     timer = asyncio.create_task(_stop_after(duration, stopper)) if duration is not None else None
     handled_signals = _install_signal_handlers(loop, stopper)
     abrupt = False
@@ -929,6 +994,7 @@ async def run_writer(
                     for request in pending:
                         await buffer.publish_control(encode_control(request))
             last_offset = record.offset
+            position.next_offset = last_offset + 1
             if metrics is not None:
                 metrics.observe_consumed()
             if consumed % _WRITER_COMMIT_RECORDS == 0:
@@ -939,7 +1005,7 @@ async def run_writer(
     finally:
         for signum in handled_signals:
             loop.remove_signal_handler(signum)
-        background = [task for task in (ticker, timer) if task is not None]
+        background = [task for task in (ticker, lag, timer) if task is not None]
         for task in background:
             task.cancel()
         await asyncio.gather(*background, return_exceptions=True)

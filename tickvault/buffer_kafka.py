@@ -247,6 +247,21 @@ class KafkaBuffer:
         partition = TopicPartition(RAW_TOPIC, _PARTITION)
         await consumer.commit({partition: OffsetAndMetadata(offset + 1, "")})
 
+    async def end_offset(self) -> int | None:
+        """Next offset the broker would assign on ``RAW_TOPIC`` partition 0.
+
+        aiokafka's ``end_offsets`` is the offset of the upcoming message — the
+        last available offset plus one — so ``end_offset() - next_to_consume``
+        is the number of records still waiting. It does not move the consumer's
+        position, so the reader can be called while the writer is consuming.
+        ``None`` when the broker reports no end offset for the partition.
+        """
+        consumer = self._raw_or_raise()
+        partition = TopicPartition(RAW_TOPIC, _PARTITION)
+        offsets = await consumer.end_offsets([partition])
+        end = offsets.get(partition)
+        return None if end is None else int(end)
+
     async def close(self) -> None:
         """Stop every client and end this buffer's open iterators."""
         if self._closed:
