@@ -395,11 +395,11 @@ def test_features_prints_one_summary_line_per_resolution(
     assert "features 1m: 1 rows, 1 files" in output
 
 
-def test_verify_reaches_the_stub() -> None:
+def test_verify_reports_a_missing_manifest() -> None:
     result = runner.invoke(app, ["verify", "--manifest", "manifest.json"])
 
     assert result.exit_code == 1
-    assert "error: verify: implemented in wave 08" in result.stderr
+    assert "error: manifest not found: manifest.json" in result.stderr
 
 
 def test_verify_prints_a_clean_summary_and_exits_zero(
