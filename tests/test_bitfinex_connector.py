@@ -554,6 +554,53 @@ async def test_close_before_stream_finishes_immediately() -> None:
     assert [message async for message in connector.stream()] == []
 
 
+async def test_close_while_waiting_for_the_resync_snapshot_leaks_nothing() -> None:
+    loop = asyncio.get_running_loop()
+    recorded: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    previous_debug = loop.get_debug()
+    loop.set_exception_handler(lambda _loop, context: recorded.append(context))
+    loop.set_debug(True)
+    try:
+        async with fake_venue() as (venue, url):
+            connector = BitfinexConnector(
+                ["BTC-USD"], url=url, clock=FakeClock(), token_hex=token_factory()
+            )
+            stream = connector.stream()
+            await anext(stream)
+            await venue.wait_for_received(SUBSCRIBE_FRAMES)
+            await venue.send(SUBSCRIBED_TRADES)
+            await venue.send(SUBSCRIBED_BOOK)
+            await anext(stream)
+            await anext(stream)
+
+            await connector.resync("BTC-USD", "checksum_failure")
+            await anext(stream)
+            # Wait until the unsubscribe/resubscribe is on the wire, then give
+            # the pump a tick to block on the snapshot with its deadline pending.
+            await venue.wait_for_received(SUBSCRIBE_FRAMES + 2)
+            await asyncio.sleep(0)
+            await connector.close()
+            remaining = [message async for message in stream]
+            assert json.loads(remaining[-1].payload) == {
+                "event": "disconnect",
+                "reason": "closed",
+            }
+            await asyncio.sleep(0.05)
+
+            pending = [
+                pending_task
+                for pending_task in asyncio.all_tasks()
+                if pending_task is not asyncio.current_task() and not pending_task.done()
+            ]
+            assert pending == []
+            gc.collect()
+            assert recorded == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+        loop.set_debug(previous_debug)
+
+
 async def _consume(connector: BitfinexConnector, connected: asyncio.Event) -> None:
     async for _message in connector.stream():
         connected.set()
