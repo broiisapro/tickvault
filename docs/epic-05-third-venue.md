@@ -147,7 +147,7 @@ form of the Kraken trailing-zero trap (A2): the values are stored as `Decimal`
 but the checksum input is formatted from the float64, because that is what the
 venue hashes. The CRC is a **signed** 32-bit integer — 47 of the fixture's 91
 live values are negative — so it is converted from `zlib.crc32`'s unsigned
-value before comparison, and the code always prints the venue's own numbers.
+value before comparison.
 
 The processor's checksum registry maps venue → `(function, depth)`; Bitfinex is
 registered at depth 25 alongside Kraken, and the legacy `kraken_depth`
