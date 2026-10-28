@@ -7,6 +7,13 @@ count, SHA-256 and byte size, sorted by path, plus totals. ``verify_manifest``
 recomputes all of it from disk and returns human-readable mismatches (empty
 list means the manifest matches), including files that are missing, modified,
 unlisted or part of a totals mismatch.
+
+The pieces ``verify_manifest`` and :mod:`tickvault.verify` share are public:
+:func:`validate_date` (the ``YYYY-MM-DD`` guard), :func:`normalized_files` (the
+Parquet files of one date), :func:`parquet_row_count` and :func:`file_sha256`.
+The historical private spellings (``_validate_date``, ``_normalized_files``,
+``_row_count``, ``_sha256``) remain as aliases so existing callers keep
+working.
 """
 
 from __future__ import annotations
@@ -24,7 +31,9 @@ import pyarrow.parquet as pq
 _CHUNK = 1 << 20
 
 
-class _ManifestEntry(TypedDict):
+class ManifestEntry(TypedDict):
+    """One normalized Parquet file as a manifest records it."""
+
     path: str
     table: str
     venue: str
@@ -40,33 +49,35 @@ class _Totals(TypedDict):
     bytes: int
 
 
-class _ManifestDocument(TypedDict):
+class ManifestDocument(TypedDict):
+    """The ``manifest.json`` body: one date, its files, and their totals."""
+
     date: str
-    files: list[_ManifestEntry]
+    files: list[ManifestEntry]
     totals: _Totals
 
 
 def write_manifest(root: str | Path, date: str) -> Path:
     """Write the manifest of ``date`` under ``root/manifests/`` and return its path."""
-    _validate_date(date)
+    validate_date(date)
     root_path = Path(root)
-    entries: list[_ManifestEntry] = []
-    for file_path in _normalized_files(root_path, date):
+    entries: list[ManifestEntry] = []
+    for file_path in normalized_files(root_path, date):
         relative = file_path.relative_to(root_path).as_posix()
         table, venue, hour = _partition_parts(relative)
         entries.append(
-            _ManifestEntry(
+            ManifestEntry(
                 path=relative,
                 table=table,
                 venue=venue,
                 hour=hour,
-                row_count=_row_count(file_path),
-                sha256=_sha256(file_path),
+                row_count=parquet_row_count(file_path),
+                sha256=file_sha256(file_path),
                 bytes=file_path.stat().st_size,
             )
         )
     entries.sort(key=lambda entry: entry["path"])
-    document = _ManifestDocument(
+    document = ManifestDocument(
         date=date,
         files=entries,
         totals=_Totals(
@@ -86,7 +97,7 @@ def write_manifest(root: str | Path, date: str) -> Path:
 def verify_manifest(path: str | Path) -> list[str]:
     """Recheck every file in the manifest; return mismatches (empty is clean)."""
     manifest_path = Path(path)
-    document: _ManifestDocument = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document: ManifestDocument = json.loads(manifest_path.read_text(encoding="utf-8"))
     root_path = manifest_path.parent.parent.parent
     date = document["date"]
     listed: set[str] = set()
@@ -102,10 +113,10 @@ def verify_manifest(path: str | Path) -> list[str]:
         size = file_path.stat().st_size
         if size != entry["bytes"]:
             problems.append(f"bytes mismatch: {relative}")
-        if _sha256(file_path) != entry["sha256"]:
+        if file_sha256(file_path) != entry["sha256"]:
             problems.append(f"sha256 mismatch: {relative}")
         try:
-            rows = _row_count(file_path)
+            rows = parquet_row_count(file_path)
         except (OSError, pa.ArrowException):
             problems.append(f"unreadable file: {relative}")
             continue
@@ -114,7 +125,7 @@ def verify_manifest(path: str | Path) -> list[str]:
         totals["files"] += 1
         totals["bytes"] += size
         totals["row_count"] += rows
-    for extra_path in _normalized_files(root_path, date):
+    for extra_path in normalized_files(root_path, date):
         relative = extra_path.relative_to(root_path).as_posix()
         if relative not in listed:
             problems.append(f"unlisted file: {relative}")
@@ -124,7 +135,8 @@ def verify_manifest(path: str | Path) -> list[str]:
     return problems
 
 
-def _normalized_files(root: Path, date: str) -> list[Path]:
+def normalized_files(root: Path, date: str) -> list[Path]:
+    """Return the normalized Parquet files of ``date`` under ``root``, sorted."""
     pattern = f"*/venue=*/date={date}/hour=*/*.parquet"
     return sorted((root / "norm").glob(pattern))
 
@@ -140,12 +152,14 @@ def _partition_parts(relative: str) -> tuple[str, str, str]:
     return table, venue_part.removeprefix("venue="), hour_part.removeprefix("hour=")
 
 
-def _row_count(path: Path) -> int:
+def parquet_row_count(path: Path) -> int:
+    """Return the number of rows recorded in ``path``'s Parquet footer."""
     metadata = pq.ParquetFile(path).metadata
     return 0 if metadata is None else metadata.num_rows
 
 
-def _sha256(path: Path) -> str:
+def file_sha256(path: Path) -> str:
+    """Return the lowercase SHA-256 hex digest of ``path``, read in chunks."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         while chunk := handle.read(_CHUNK):
@@ -153,10 +167,30 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_date(date: str) -> None:
+def validate_date(date: str) -> None:
+    """Reject anything but a ``YYYY-MM-DD`` calendar date."""
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
         raise ValueError(f"date must be formatted YYYY-MM-DD, got {date!r}")
     try:
         datetime.strptime(date, "%Y-%m-%d")
     except ValueError as exc:
         raise ValueError(f"date must be a valid calendar date, got {date!r}") from exc
+
+
+_sha256 = file_sha256
+"""Alias of :func:`file_sha256`, kept for callers that predate the public names."""
+
+_row_count = parquet_row_count
+"""Alias of :func:`parquet_row_count`."""
+
+_normalized_files = normalized_files
+"""Alias of :func:`normalized_files`."""
+
+_validate_date = validate_date
+"""Alias of :func:`validate_date`."""
+
+_ManifestEntry = ManifestEntry
+"""Alias of :class:`ManifestEntry`."""
+
+_ManifestDocument = ManifestDocument
+"""Alias of :class:`ManifestDocument`."""
