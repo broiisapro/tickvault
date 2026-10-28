@@ -278,6 +278,14 @@ def test_ask_amounts_are_negative() -> None:
     ) != _signed_crc32("6000:1:6100:3:5900:2:6200:4")
 
 
+def test_bid_and_ask_levels_interleave_by_rank() -> None:
+    """Ranks alternate bid/ask; hashing all bids then all asks never matches."""
+    computed = bitfinex_checksum(_levels(DOCUMENTED_BIDS), _levels(DOCUMENTED_ASKS))
+    assert computed == _signed_crc32(DOCUMENTED_TEXT)
+    all_bids_then_all_asks = _signed_crc32("6000:1:5900:2:6100:-3:6200:-4")
+    assert computed != all_bids_then_all_asks
+
+
 def test_only_the_top_twenty_five_levels_per_side_are_hashed() -> None:
     """The digest covers the top 25 levels; deeper levels are ignored."""
     bids = _levels(DOCUMENTED_BIDS) + [
