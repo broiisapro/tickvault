@@ -202,7 +202,7 @@ class _BookStates:
 
 
 class _Recorder:
-    """Normalize, process and count one raw message; used by both entry points.
+    """Normalize, process and count one raw message; used by every entry point.
 
     ``metrics`` and ``books`` are optional. With both ``None`` the recorder is
     exactly the Phase 1 one: it only counts. ``books`` tracks each book's LIVE
@@ -666,11 +666,10 @@ async def _report_buffered_progress(
             f"{venue}={counters.by_venue.get(venue, 0)}" for venue in venues
         )
         _LOGGER.info(
-            "ingest progress: elapsed=%.0fs raw_msgs=%d (%s) published=%d",
+            "ingest progress: elapsed=%.0fs published=%d (%s)",
             time.monotonic() - started,
             counters.published,
             by_venue,
-            counters.published,
         )
         now = loop.time()
         schedule = max(schedule + interval, now + interval)
@@ -924,13 +923,11 @@ async def run_writer(
                     del pending[:]
                     raw_writer.write(message)
                     written.add(key)
-                    for request in recorder.process(
-                        message, on_normalized=note_sync_requests
-                    ):
-                        pending.append(request)
+                    pending.extend(
+                        recorder.process(message, on_normalized=note_sync_requests)
+                    )
                     for request in pending:
                         await buffer.publish_control(encode_control(request))
-                    del pending[:]
             last_offset = record.offset
             if metrics is not None:
                 metrics.observe_consumed()
