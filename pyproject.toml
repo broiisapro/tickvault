@@ -33,6 +33,7 @@ dependencies = [
     "typer>=0.27",
     "sortedcontainers>=2.4",
     "httpx>=0.28",
+    "prometheus-client>=0.26.0",
 ]
 
 [project.urls]
@@ -65,9 +66,12 @@ orchestration = [
 dashboard = [
     "streamlit>=1.66",
 ]
+buffer = [
+    "aiokafka>=0.14,<0.15",
+]
 
 [tool.uv]
-default-groups = ["dev", "orchestration", "dashboard"]
+default-groups = ["dev", "orchestration", "dashboard", "buffer"]
 
 [tool.ruff]
 line-length = 100
