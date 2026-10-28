@@ -1,0 +1,18 @@
+# Prometheus for the TickVault Compose metrics profile (decision A71).
+#
+# The ingester serves /metrics on 9108 and the writer on 9109; both are
+# container names on the Compose network. The writer only exists while the
+# buffer profile is up, so its target reads "down" in a metrics-only stack.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: ingester
+    static_configs:
+      - targets: ["ingester:9108"]
+
+  - job_name: writer
+    static_configs:
+      - targets: ["writer:9109"]

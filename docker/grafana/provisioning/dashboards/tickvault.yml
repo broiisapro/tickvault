@@ -1,0 +1,15 @@
+apiVersion: 1
+
+# Load every dashboard JSON in this directory; the "TickVault" dashboard is
+# the one committed next to this file. Deletions from the UI are disabled so
+# the provisioned set always matches the repository.
+providers:
+  - name: tickvault
+    orgId: 1
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

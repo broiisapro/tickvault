@@ -1,0 +1,11 @@
+apiVersion: 1
+
+# The one Prometheus that Prometheus itself serves for the TickVault stack.
+datasources:
+  - name: Prometheus
+    uid: tickvault-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

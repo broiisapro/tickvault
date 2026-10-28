@@ -1,14 +1,17 @@
 # TickVault images (linux/arm64).
 #
 # Targets:
-#   ingester      -- tickvault runtime, base dependencies only
+#   ingester      -- tickvault runtime + the buffer dependency group (aiokafka)
+#   writer        -- same as ingester; `tickvault consume` has the same imports
 #   dashboard     -- ingester + the dashboard dependency group (Streamlit)
 #   orchestration -- ingester + the orchestration dependency group (Dagster)
 #
 # Dependencies are installed with uv from uv.lock; only the requested group is
 # added to the base set (`--no-default-groups` drops the dev/orchestration/
 # dashboard defaults), and the runtime carries no uv, no build tools and runs
-# as an unprivileged user.
+# as an unprivileged user. The buffer group is installed for the ingester and
+# the writer only: without it neither can open the Redpanda buffer, while the
+# dashboard and Dagster images stay without a broker client.
 
 FROM --platform=linux/arm64 python:3.12-slim AS base
 COPY --from=ghcr.io/astral-sh/uv:0.11.26 /uv /uvx /bin/
@@ -27,6 +30,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-default-groups
+
+FROM builder AS builder-buffer
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-default-groups --group buffer
 
 FROM builder AS builder-dashboard
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -51,7 +58,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 FROM runtime AS ingester
-COPY --from=builder --chown=tickvault:tickvault /app /app
+COPY --from=builder-buffer --chown=tickvault:tickvault /app /app
+USER tickvault
+
+FROM runtime AS writer
+COPY --from=builder-buffer --chown=tickvault:tickvault /app /app
 USER tickvault
 
 FROM runtime AS dashboard

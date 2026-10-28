@@ -1,10 +1,24 @@
 # TickVault local stack (linux/arm64).
 #
-#   docker compose up -d --build      # ingester + dashboard, shared /data volume
+#   docker compose up -d --build                     # ingester + dashboard (direct mode)
+#   make demo-buffer                                 # + Redpanda writer, Prometheus, Grafana
 #   docker compose --profile orchestration up -d
 #
 # The ingester writes raw and normalized data into the tickvault-data volume;
 # the dashboard reads the same volume through TICKVAULT_DATA_DIR.
+#
+# Profiles (decision A69):
+#   buffer  -- redpanda (Kafka API) and writer (`tickvault consume`). With
+#              TICKVAULT_BUFFER set the ingester publishes every raw envelope
+#              to Redpanda instead of writing it, and the writer writes it to
+#              the shared volume before normalizing; unset or empty keeps the
+#              Phase 1 direct path unchanged. `make demo-buffer` sets it.
+#   metrics -- Prometheus scraping the ingester (9108) and the writer (9109)
+#              and Grafana with one provisioned "TickVault" dashboard.
+#
+# Grafana's admin password is read from TICKVAULT_GRAFANA_ADMIN_PASSWORD in
+# .env; the default used here is deliberately non-secret and only for local
+# demos. Anonymous viewers get read-only access, so no login is needed.
 
 name: tickvault
 
@@ -25,9 +39,113 @@ services:
       - BTC-USD,ETH-USD
       - --out
       - /data
+      - --metrics-port
+      - "9108"
+      - --buffer
+      - ${TICKVAULT_BUFFER:-}
+    ports:
+      - "9108:9108"
     restart: unless-stopped
     volumes:
       - tickvault-data:/data
+
+  writer:
+    profiles: [buffer]
+    platform: linux/arm64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: writer
+    image: tickvault:writer
+    # No restart policy: the buffered smoke check kills the writer on purpose
+    # and brings it back to prove the at-least-once path loses no raw message.
+    restart: "no"
+    command:
+      - tickvault
+      - consume
+      - --buffer
+      - redpanda:9092
+      - --out
+      - /data
+      - --metrics-port
+      - "9109"
+    ports:
+      - "9109:9109"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - tickvault-data:/data
+
+  redpanda:
+    profiles: [buffer]
+    platform: linux/arm64
+    image: redpandadata/redpanda:v26.2.6
+    # Single-node dev-container mode: enough for one local ingester and one
+    # writer, small enough to share the machine with other work. Only the
+    # internal listener is advertised, so in-cluster clients use redpanda:9092.
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092
+      - --rpc-addr
+      - 0.0.0.0:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+
+  prometheus:
+    profiles: [metrics]
+    platform: linux/arm64
+    image: prom/prometheus:v3.15.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=6h
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    profiles: [metrics]
+    platform: linux/arm64
+    image: grafana/grafana:13.2.4
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${TICKVAULT_GRAFANA_ADMIN_PASSWORD:-tickvault-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
 
   dashboard:
     platform: linux/arm64
@@ -84,3 +202,6 @@ services:
 
 volumes:
   tickvault-data:
+  redpanda-data:
+  prometheus-data:
+  grafana-data:
