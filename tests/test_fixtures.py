@@ -46,6 +46,7 @@ def _by_connection(lines: list[RawMessage]) -> dict[str, list[RawMessage]]:
 
 def test_jsonl_fixtures_are_discovered() -> None:
     assert JSONL_FIXTURES == [
+        "bitfinex_btc_5m.jsonl.zst",
         "coinbase_btc_5m.jsonl.zst",
         "kraken_btc_5m.jsonl.zst",
         "synthetic_gap_session.jsonl.zst",
@@ -82,13 +83,13 @@ def test_raw_fixture_structure(
 def test_fixtures_manifest_matches_files(fixtures_dir: Path, raw_lines: RawLines) -> None:
     manifest = json.loads((fixtures_dir / "fixtures.json").read_text(encoding="utf-8"))
     entries = manifest["fixtures"]
-    assert len(entries) == 2
+    assert len(entries) == 3
     for entry in entries:
         path = REPO_ROOT / entry["path"]
         assert path.exists(), entry["path"]
         assert hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"]
         assert len(raw_lines(path)) == entry["line_count"]
-        assert entry["venue"] in {"coinbase", "kraken"}
+        assert entry["venue"] in {"coinbase", "kraken", "bitfinex"}
         assert entry["recorded_at"].endswith("Z")
         assert entry["source_url"].startswith("wss://")
         assert entry["generator"] == "scripts/record_fixture.py"
