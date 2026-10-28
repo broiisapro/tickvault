@@ -38,16 +38,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tickvault.book.processor import BookProcessor, ResyncRequest
+from tickvault.buffer import Buffer
 from tickvault.connectors.base import Connector
-from tickvault.connectors.coinbase import CoinbaseConnector
-from tickvault.connectors.kraken import KrakenConnector
+from tickvault.metrics import PipelineMetrics
 from tickvault.models import NormalizedMessage, RawMessage
 from tickvault.normalize import NormalizeError
-from tickvault.normalize import coinbase as coinbase_normalize
-from tickvault.normalize import kraken as kraken_normalize
 from tickvault.rawio import iter_raw
 from tickvault.storage.parquet_writer import ParquetWriter
 from tickvault.storage.raw_writer import RawWriter
+from tickvault.venues import VENUES, ConnectorFactory
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,12 +63,8 @@ _LIVE_QUEUE_MAXSIZE = 10_000
 """Bound of the live merge queue; a slow consumer backpressures the connectors."""
 
 _NORMALIZERS: dict[str, Callable[[RawMessage], NormalizedMessage]] = {
-    "coinbase": coinbase_normalize.normalize,
-    "kraken": kraken_normalize.normalize,
+    name: spec.normalize for name, spec in VENUES.items()
 }
-
-type ConnectorFactory = Callable[[Sequence[str]], Connector]
-"""Builds one connector for a venue and a fixed symbol set."""
 
 type StopReason = str
 """One of ``completed``, ``duration``, ``stop_event``, ``signal``, ``max_gb``."""
@@ -140,7 +135,7 @@ class PipelineStats:
 
 def default_connector_factories() -> dict[str, ConnectorFactory]:
     """Return the production connector factory for each supported venue."""
-    return {"coinbase": CoinbaseConnector, "kraken": KrakenConnector}
+    return {name: spec.connector for name, spec in VENUES.items()}
 
 
 class _Recorder:
@@ -279,6 +274,8 @@ async def run_live(
     connector_factories: Mapping[str, ConnectorFactory] | None = None,
     stop_event: asyncio.Event | None = None,
     progress_interval: float = _LIVE_PROGRESS_S,
+    buffer: Buffer | None = None,
+    metrics: PipelineMetrics | None = None,
 ) -> PipelineStats:
     """Stream live venue data into the raw and normalized layers under ``out``.
 
@@ -301,7 +298,14 @@ async def run_live(
     logging itself; the CLI does. ``max_gb`` is enforced from the writers'
     ``bytes_written`` counters plus the data root's size measured once at
     start-up, so no directory walk happens while the run is live.
+
+    ``buffer`` and ``metrics`` are the Phase 2 hooks. Both default to ``None``,
+    which leaves the Phase 1 path above untouched. ``metrics`` is accepted and
+    ignored until wave 08 wires it; a non-``None`` ``buffer`` raises
+    :class:`NotImplementedError` because buffered ingest lands in wave 08.
     """
+    if buffer is not None:
+        raise NotImplementedError("buffered ingest: implemented in wave 08")
     if progress_interval < 0:
         raise ValueError("progress_interval must be non-negative")
     out_path = Path(out)
@@ -393,6 +397,28 @@ async def run_live(
         _progress_fields(recorder, raw_writer, parquet, venues),
     )
     return stats
+
+
+async def run_writer(
+    buffer: Buffer,
+    out: str | Path,
+    *,
+    duration: float | None = None,
+    metrics: PipelineMetrics | None = None,
+    stop_event: asyncio.Event | None = None,
+) -> PipelineStats:
+    """Consume a raw buffer and write it like replay does.
+
+    The buffered-writer path: read :meth:`Buffer.consume_raw`, write every raw
+    line through :class:`RawWriter` first, then run it through the unchanged
+    normalizer → processor → Parquet pipeline, commit offsets only once the raw
+    writer has flushed, publish resync requests to the control topic and serve
+    ``metrics`` when given. ``duration`` and ``stop_event`` stop it gracefully.
+
+    Wave 08 implements this; the Phase 2 foundation only freezes the
+    signature.
+    """
+    raise NotImplementedError("writer: implemented in wave 08")
 
 
 async def _pump(

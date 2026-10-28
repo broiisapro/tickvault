@@ -6,6 +6,8 @@ from tickvault.models import (
     BOOK_DELTAS_SCHEMA,
     BOOK_SNAPSHOTS_SCHEMA,
     EVENTS_SCHEMA,
+    FEATURES_SCHEMA,
+    FEATURES_TABLE,
     TABLES,
     TRADES_SCHEMA,
     BookDelta,
@@ -201,3 +203,65 @@ def test_decimal_trailing_zeros_survive_arrow() -> None:
     assert row["price"].as_tuple().exponent == -18
     assert str(row["price"]) == "0.000061200000000000"
     assert str(row["size"]).startswith("81203.0")
+
+
+def test_features_schema_columns_in_order() -> None:
+    assert FEATURES_TABLE == "features"
+    assert [field.name for field in FEATURES_SCHEMA] == [
+        "venue",
+        "symbol",
+        "resolution",
+        "bar_start_ns",
+        "bar_end_ns",
+        "best_bid",
+        "best_ask",
+        "mid",
+        "spread_bps",
+        "depth_imbalance_5",
+        "book_sample_ts_ns",
+        "trade_count",
+        "volume",
+        "signed_volume",
+        "vwap",
+        "realized_vol",
+    ]
+
+
+def test_features_schema_types() -> None:
+    string_columns = {"venue", "symbol", "resolution"}
+    int_columns = {"bar_start_ns", "bar_end_ns", "book_sample_ts_ns", "trade_count"}
+    float_columns = {
+        "best_bid",
+        "best_ask",
+        "mid",
+        "spread_bps",
+        "depth_imbalance_5",
+        "volume",
+        "signed_volume",
+        "vwap",
+        "realized_vol",
+    }
+    for field in FEATURES_SCHEMA:
+        if field.name in string_columns:
+            expected = pa.string()
+        elif field.name in int_columns:
+            expected = pa.int64()
+        else:
+            assert field.name in float_columns
+            expected = pa.float64()
+        assert field.type == expected, field.name
+    assert {field.name for field in FEATURES_SCHEMA if field.nullable is False} == {
+        "venue",
+        "symbol",
+        "resolution",
+        "bar_start_ns",
+        "bar_end_ns",
+        "trade_count",
+        "volume",
+        "signed_volume",
+    }
+
+
+def test_features_schema_is_not_a_normalized_table() -> None:
+    assert "features" not in TABLES
+    assert set(TABLES) == {"trades", "book_deltas", "book_snapshots", "events"}
