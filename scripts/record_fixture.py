@@ -19,6 +19,12 @@ Usage:
         --seconds 300 --out tests/fixtures/coinbase_btc_5m.jsonl.zst
     scripts/record_fixture.py --venue kraken --symbol BTC-USD \
         --seconds 300 --out tests/fixtures/kraken_btc_5m.jsonl.zst
+    scripts/record_fixture.py --venue bitfinex --symbol BTC-USD \
+        --seconds 300 --out tests/fixtures/bitfinex_btc_5m.jsonl.zst
+
+The ``connect`` control line declares the normalized symbol in ``symbols``
+(decision A29) alongside the exact subscribe payloads that were sent, so a
+recording carries the connection's symbol scope.
 """
 
 from __future__ import annotations
@@ -39,6 +45,17 @@ from websockets.exceptions import ConnectionClosed
 
 COINBASE_URL = "wss://advanced-trade-ws.coinbase.com"
 KRAKEN_URL = "wss://ws.kraken.com/v2"
+BITFINEX_URL = "wss://api-pub.bitfinex.com/ws/2"
+
+# Bitfinex connection configuration flags (``conf`` message). SEQ_ALL makes
+# every frame carry a per-connection sequence number; OB_CHECKSUM makes the
+# venue send a ``cs`` frame after each book batch; TIMESTAMP appends a venue
+# timestamp (epoch milliseconds) to every book, checksum and trade frame,
+# which book messages otherwise do not carry.
+BITFINEX_SEQ_ALL = 65536
+BITFINEX_OB_CHECKSUM = 131072
+BITFINEX_TIMESTAMP = 32768
+BITFINEX_FLAGS = BITFINEX_SEQ_ALL | BITFINEX_OB_CHECKSUM | BITFINEX_TIMESTAMP
 
 # Coinbase sends the full BTC-USD level2 snapshot (tens of thousands of
 # levels) in a single multi-MB text frame.
@@ -125,8 +142,35 @@ def kraken_subscriptions(symbol: str) -> list[dict[str, Any]]:
     ]
 
 
+def bitfinex_venue_symbol(symbol: str) -> str:
+    """Translate ``BASE-QUOTE`` to Bitfinex's ``tSYMBOL`` (``tBASE:QUOTE`` if long)."""
+    base, quote = symbol.split("-")
+    if len(base) > 3 or len(quote) > 3:
+        return f"t{base}:{quote}"
+    return f"t{base}{quote}"
+
+
+def bitfinex_subscriptions(symbol: str) -> list[dict[str, Any]]:
+    venue_symbol = bitfinex_venue_symbol(symbol)
+    return [
+        {"event": "conf", "flags": BITFINEX_FLAGS},
+        {
+            "event": "subscribe",
+            "channel": "book",
+            "symbol": venue_symbol,
+            "prec": "P0",
+            "len": "25",
+        },
+        {"event": "subscribe", "channel": "trades", "symbol": venue_symbol},
+    ]
+
+
 async def record(
-    url: str, subscriptions: list[dict[str, Any]], seconds: float, recorder: RawRecorder
+    url: str,
+    symbols: list[str],
+    subscriptions: list[dict[str, Any]],
+    seconds: float,
+    recorder: RawRecorder,
 ) -> bool:
     """Connect, subscribe and record frames until ``seconds`` elapse.
 
@@ -135,7 +179,13 @@ async def record(
     clean = False
     async with connect(url, max_size=MAX_SIZE, open_timeout=15) as ws:
         connect_ns = time.time_ns()
-        recorder.write_control(connect_ns, event="connect", url=url, subscriptions=subscriptions)
+        recorder.write_control(
+            connect_ns,
+            event="connect",
+            url=url,
+            symbols=symbols,
+            subscriptions=subscriptions,
+        )
         for payload in subscriptions:
             await ws.send(json.dumps(payload, separators=(",", ":")))
         deadline = time.monotonic() + seconds
@@ -158,7 +208,7 @@ async def record(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--venue", required=True, choices=["coinbase", "kraken"])
+    parser.add_argument("--venue", required=True, choices=["coinbase", "kraken", "bitfinex"])
     parser.add_argument("--symbol", required=True, help="venue-agnostic symbol, e.g. BTC-USD")
     parser.add_argument("--seconds", type=float, required=True, help="recording duration")
     parser.add_argument("--out", type=Path, required=True, help="output .jsonl.zst path")
@@ -174,16 +224,21 @@ def main(argv: list[str] | None = None) -> int:
     if venue == "coinbase":
         url = COINBASE_URL
         subscriptions = coinbase_subscriptions(args.symbol)
-    else:
+    elif venue == "kraken":
         url = KRAKEN_URL
         subscriptions = kraken_subscriptions(args.symbol)
+    else:
+        url = BITFINEX_URL
+        subscriptions = bitfinex_subscriptions(args.symbol)
 
     connect_ns = time.time_ns()
     recorder = RawRecorder(args.out, venue, connection_id(venue, connect_ns))
     exit_code = 1
     reason = "error"
     try:
-        clean = asyncio.run(record(url, subscriptions, args.seconds, recorder))
+        clean = asyncio.run(
+            record(url, [args.symbol], subscriptions, args.seconds, recorder)
+        )
         reason = "duration_elapsed" if clean else "connection_closed"
         exit_code = 0 if clean else 1
     except ConnectionClosed as exc:
