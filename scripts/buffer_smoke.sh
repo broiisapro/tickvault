@@ -7,21 +7,23 @@
 # then checks that the restart lost nothing: for every connection in the raw
 # layer the ingest sequence numbers must cover 0..max without a hole (read with
 # tickvault.rawio.iter_raw inside the writer container, which shares the data
-# volume). It also checks that `tickvault qa --data /data` exits 0 and that the
-# writer's Prometheus endpoint reports a non-zero
-# tickvault_buffer_consumed_total. Every check prints PASS or FAIL and the
-# script exits non-zero if any of them failed.
+# volume). It also checks that `tickvault qa --data /data` exits 0, that the
+# ingester's Prometheus endpoint reports received venue messages and that the
+# writer's reports a non-zero tickvault_buffer_consumed_total. Every check
+# prints PASS or FAIL and the script exits non-zero if any of them failed.
 #
-# Only the TickVault Compose project (`tickvault`, named in compose.yaml) is
-# touched. The exit trap tears that project down including its volumes, so the
-# next run starts clean; no other container, image or volume on the machine is
-# stopped or removed.
+# The run starts from empty volumes and the exit trap tears the project down
+# including its volumes, so consecutive runs are independent and no data from
+# an earlier demo can mask a problem. No other container, image or volume on
+# the machine is stopped or removed: the Compose project is `tickvault`, as
+# named in compose.yaml.
 #
 # Optional knobs (seconds unless noted):
 #   TICKVAULT_SMOKE_DATA_TIMEOUT     180  wait for the first partitions
 #   TICKVAULT_SMOKE_KILL_WAIT        30   writer downtime
 #   TICKVAULT_SMOKE_RESTART_TIMEOUT  180  wait for the writer to recover
 #   TICKVAULT_SMOKE_METRICS_PORT     9109 writer metrics port
+#   TICKVAULT_SMOKE_INGEST_PORT      9108 ingester metrics port
 
 set -euo pipefail
 
@@ -32,6 +34,7 @@ DATA_TIMEOUT="${TICKVAULT_SMOKE_DATA_TIMEOUT:-180}"
 KILL_WAIT="${TICKVAULT_SMOKE_KILL_WAIT:-30}"
 RESTART_TIMEOUT="${TICKVAULT_SMOKE_RESTART_TIMEOUT:-180}"
 METRICS_PORT="${TICKVAULT_SMOKE_METRICS_PORT:-9109}"
+INGEST_METRICS_PORT="${TICKVAULT_SMOKE_INGEST_PORT:-9108}"
 
 PASSES=0
 FAILURES=0
@@ -156,12 +159,17 @@ check_qa() {
 
 check_metrics() {
     local url="http://localhost:${METRICS_PORT}/metrics"
+    local deadline=$((SECONDS + 30))
     local body=""
     local value=""
-    if ! body="$(curl -fsS "$url")"; then
-        fail "writer metrics endpoint ${url} is not reachable"
-        return
-    fi
+    # The writer was just restarted; give its HTTP endpoint a moment to bind.
+    until body="$(curl -fsS "$url" 2>/dev/null)"; do
+        if ((SECONDS >= deadline)); then
+            fail "writer metrics endpoint ${url} is not reachable"
+            return
+        fi
+        sleep 2
+    done
     value="$(printf '%s\n' "$body" | awk '$1 == "tickvault_buffer_consumed_total" { print $2; exit }')"
     if [[ -z "$value" ]]; then
         fail "tickvault_buffer_consumed_total is missing from ${url}"
@@ -173,6 +181,28 @@ check_metrics() {
         fail "tickvault_buffer_consumed_total is ${value}, expected > 0"
     fi
 }
+
+# The ingester is the other half of the buffered path: it must report received
+# venue messages, otherwise the buffer is only carrying control frames.
+check_ingest_metrics() {
+    local url="http://localhost:${INGEST_METRICS_PORT}/metrics"
+    local body=""
+    local matched=""
+    if ! body="$(curl -fsS "$url")"; then
+        fail "ingester metrics endpoint ${url} is not reachable"
+        return
+    fi
+    matched="$(printf '%s\n' "$body" | grep -E '^tickvault_messages_total\{.*\} [1-9]' || true)"
+    if [[ -n "$matched" ]]; then
+        printf '%s\n' "$matched"
+        pass "tickvault_messages_total is non-zero for at least one venue"
+    else
+        fail "no tickvault_messages_total series above 0 on ${url}"
+    fi
+}
+
+echo "== docker compose --profile buffer --profile metrics down --volumes --remove-orphans (clean start) =="
+"${COMPOSE[@]}" down --volumes --remove-orphans
 
 echo "== make demo-buffer =="
 make demo-buffer
@@ -207,9 +237,12 @@ wait_for_qa "$RESTART_TIMEOUT" || true
 check_raw_contiguity
 check_qa
 check_metrics
+check_ingest_metrics
 
 echo "== summary: ${PASSES} passed, ${FAILURES} failed =="
 if ((FAILURES > 0)); then
+    echo "== docker compose ps -a =="
+    "${COMPOSE[@]}" ps -a || true
     echo "== ingester, writer and redpanda logs =="
     "${COMPOSE[@]}" logs --tail 30 ingester writer redpanda || true
     exit 1
