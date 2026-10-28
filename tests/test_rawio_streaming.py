@@ -1,9 +1,11 @@
-"""Streaming-reader equivalence and bounded memory (issues #51, #77).
+"""Streaming-reader equivalence and bounded memory (issues #51, #77, #124).
 
-The reference reader below is a verbatim copy of the pre-#51 implementation:
-read every file into a list, then stable-sort the concatenation by
-``(recv_ts_ns, connection_id, ingest_seq)``. The streaming reader must produce
-the same messages, the same order and the same :class:`RawReadStats` on every
+The reference reader below mirrors the pre-#51 implementation: read every file
+into a list, then stable-sort the concatenation by
+``(recv_ts_ns, connection_id, ingest_seq)``; since issue #124 it also applies
+the duplicate rule (an exactly repeated line is skipped, a same-key line with
+different bytes is a conflict). The streaming reader must produce the same
+messages, the same order and the same :class:`RawReadStats` on every
 committed fixture, on a multi-file tree with deliberate ties, and on shuffled
 line orders that force the external-sort fallback. In-order files must stream
 with memory that does not grow with the number of lines, and the fallback must
@@ -80,8 +82,21 @@ def _reference_iter_raw(path_or_dir: str | Path) -> tuple[list[RawMessage], RawR
     messages.sort(
         key=lambda message: (message.recv_ts_ns, message.connection_id, message.ingest_seq)
     )
-    stats.messages = len(messages)
-    return messages, stats
+    # Issue #124: the reader drops a line whose canonical key and stored bytes
+    # repeat the previously yielded line and counts a same-key line with
+    # different bytes as a conflict. The reference mirrors that rule (using the
+    # canonical encoding, which is what the tests write) so it stays a model of
+    # the streaming reader.
+    kept: list[RawMessage] = []
+    for message in messages:
+        if kept and _canonical_key(kept[-1]) == _canonical_key(message):
+            if encode_line(kept[-1]) == encode_line(message):
+                stats.duplicates += 1
+                continue
+            stats.conflicts += 1
+        kept.append(message)
+    stats.messages = len(kept)
+    return kept, stats
 
 
 def _raw(
@@ -159,15 +174,17 @@ def test_streaming_reader_matches_reference_on_multi_file_tree(tmp_path: Path) -
     assert list(iter_raw(root, stats=stats)) == expected_messages
     assert stats == expected_stats
     # Ties keep the sorted file order, exactly like the old global stable sort
-    # on the concatenation: the exact duplicate (c, 7, 150) appears in file
-    # "b-00000" (read first) before file "c-00000".
+    # on the concatenation. The exact duplicate (c, 7, 150) sits in both
+    # "b-00000" and "c-00000"; since issue #124 the second copy is skipped and
+    # counted in ``stats.duplicates`` instead of being yielded twice.
+    assert expected_stats.duplicates == 1
+    assert expected_stats.conflicts == 0
     assert [(m.recv_ts_ns, m.connection_id, m.ingest_seq) for m in expected_messages] == [
         (50, connection_c, 0),
         (100, connection_b, 0),
         (100, connection_b, 5),
         (100, connection_a, 0),
         (100, connection_a, 1),
-        (150, connection_c, 7),
         (150, connection_c, 7),
         (200, connection_b, 1),
         (200, connection_c, 1),
