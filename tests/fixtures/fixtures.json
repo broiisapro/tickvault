@@ -17,6 +17,15 @@
       "recorded_at": "2026-10-15T11:56:19Z",
       "source_url": "wss://ws.kraken.com/v2",
       "generator": "scripts/record_fixture.py"
+    },
+    {
+      "path": "tests/fixtures/bitfinex_btc_5m.jsonl.zst",
+      "sha256": "96e188ee071f3b40c40e534667a57b47f4ea316c90a25a82d3982dc72e729fbb",
+      "line_count": 8241,
+      "venue": "bitfinex",
+      "recorded_at": "2026-10-28T03:39:38Z",
+      "source_url": "wss://api-pub.bitfinex.com/ws/2",
+      "generator": "scripts/record_fixture.py"
     }
   ]
 }
