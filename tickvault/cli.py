@@ -27,7 +27,10 @@ import duckdb
 import typer
 
 from tickvault.bench import run_benchmark
-from tickvault.pipeline import PipelineStats, run_live, run_replay
+from tickvault.buffer import open_buffer
+from tickvault.features import RESOLUTIONS, compute_features, write_features
+from tickvault.metrics import MetricsServer, PipelineMetrics
+from tickvault.pipeline import PipelineStats, run_live, run_replay, run_writer
 from tickvault.qa.report import exit_code as qa_exit_code
 from tickvault.qa.report import run_qa, to_json, to_text_table, write_reports
 from tickvault.reconcile.download import reconcile_live_day
@@ -43,13 +46,15 @@ from tickvault.sql import run_query, view_ddl
 from tickvault.storage.compact import CompactionError
 from tickvault.storage.compact import compact as compact_partitions
 from tickvault.storage.manifest import write_manifest
+from tickvault.venues import venue_names
+from tickvault.verify import VerifyReport, verify_remote
 
 app = typer.Typer(
     help="TickVault: live crypto market-data pipeline.",
     no_args_is_help=True,
 )
 
-_SUPPORTED_VENUES = ("coinbase", "kraken")
+_SUPPORTED_VENUES = venue_names()
 _SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+$")
 
 
@@ -145,6 +150,34 @@ def _print_reconcile_report(report: ReconcileReport, *, as_json: bool) -> None:
     print(text, end="")
 
 
+def _buffer_address(value: str | None) -> str | None:
+    """Resolve a buffer option: ``None`` and the empty string both mean off."""
+    if value is None:
+        return None
+    address = value.strip()
+    return address or None
+
+
+def _start_metrics(port: int | None) -> tuple[PipelineMetrics | None, MetricsServer | None]:
+    """Build the metrics registry and HTTP endpoint for ``--metrics-port``.
+
+    ``None`` and ``0`` both mean "off". The port is validated here so the CLI
+    exit code stays 2 for bad arguments instead of 1 for a failed bind.
+    """
+    if port is not None and not 0 <= port <= 65535:
+        _usage_error("--metrics-port must be between 0 and 65535")
+    if not port:
+        return None, None
+    metrics = PipelineMetrics()
+    return metrics, metrics.serve(port)
+
+
+def _print_verify_report(report: VerifyReport) -> None:
+    print(f"verify {report.manifest}: {report.ok}/{report.files} files ok")
+    for problem in report.problems:
+        print(problem)
+
+
 @app.command()
 def ingest(
     venues: Annotated[
@@ -172,11 +205,30 @@ def ingest(
         str,
         typer.Option("--log-level", help="Stderr logging level, e.g. INFO or DEBUG."),
     ] = "INFO",
+    buffer: Annotated[
+        str | None,
+        typer.Option(
+            "--buffer",
+            envvar="TICKVAULT_BUFFER",
+            help="Publish raw lines to a buffer instead of writing them: "
+            "HOST:PORT or memory://NAME; empty = off.",
+        ),
+    ] = None,
+    metrics_port: Annotated[
+        int | None,
+        typer.Option(
+            "--metrics-port",
+            envvar="TICKVAULT_METRICS_PORT",
+            help="Serve Prometheus metrics on this port; 0 or unset = off.",
+        ),
+    ] = None,
 ) -> None:
     """Stream live venue data into the raw and normalized layers."""
     _configure_logging(log_level)
     venue_list = _validate_venues(venues)
     symbol_list = _validate_symbols(symbols)
+    address = _buffer_address(buffer)
+    metrics, server = _start_metrics(metrics_port)
     try:
         stats = asyncio.run(
             run_live(
@@ -186,6 +238,8 @@ def ingest(
                 duration=duration,
                 max_gb=max_gb,
                 progress_interval=progress_interval,
+                buffer=None if address is None else open_buffer(address),
+                metrics=metrics,
             )
         )
     except KeyboardInterrupt:
@@ -194,6 +248,9 @@ def ingest(
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise typer.Exit(code=1) from None
+    finally:
+        if server is not None:
+            server.close()
     _print_stats(stats)
     if stats.stopped_by == "max_gb":
         raise typer.Exit(code=3)
@@ -382,3 +439,108 @@ def bench(
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
         print(report.to_text(), end="")
+
+
+@app.command()
+def consume(
+    buffer: Annotated[
+        str,
+        typer.Option("--buffer", help="Buffer address to read: HOST:PORT or memory://NAME."),
+    ],
+    out: Annotated[Path, typer.Option("--out", help="Data root for raw and normalized output.")],
+    metrics_port: Annotated[
+        int | None,
+        typer.Option(
+            "--metrics-port",
+            help="Serve Prometheus metrics on this port; 0 or unset = off.",
+        ),
+    ] = None,
+    duration: Annotated[
+        float | None, typer.Option("--duration", help="Stop after this many seconds.")
+    ] = None,
+    log_level: Annotated[
+        str,
+        typer.Option("--log-level", help="Stderr logging level, e.g. INFO or DEBUG."),
+    ] = "INFO",
+) -> None:
+    """Consume a raw buffer into the raw and normalized layers."""
+    _configure_logging(log_level)
+    address = _buffer_address(buffer)
+    if address is None:
+        _usage_error("--buffer must not be empty")
+    metrics, server = _start_metrics(metrics_port)
+    try:
+        stats = asyncio.run(
+            run_writer(
+                open_buffer(address),
+                out,
+                duration=duration,
+                metrics=metrics,
+            )
+        )
+    except KeyboardInterrupt:
+        print("error: interrupted before the run could start", file=sys.stderr)
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from None
+    finally:
+        if server is not None:
+            server.close()
+    _print_stats(stats)
+
+
+@app.command()
+def features(
+    data: Annotated[Path, typer.Option("--data", help="Data root holding the normalized layer.")],
+    date: Annotated[str, typer.Option("--date", help="UTC date to compute (YYYY-MM-DD).")],
+    out: Annotated[Path, typer.Option("--out", help="Data root to write the features tree under.")],
+    resolution: Annotated[
+        str,
+        typer.Option("--resolution", help="Comma-separated resolutions, e.g. 1s,1m."),
+    ] = "1s,1m",
+) -> None:
+    """Compute the derived features table for one UTC date."""
+    try:
+        parsed_day = Date.fromisoformat(date)
+    except ValueError:
+        _usage_error(f"invalid date: {date!r} (expected YYYY-MM-DD)")
+    if parsed_day.isoformat() != date:
+        _usage_error(f"invalid date: {date!r} (expected YYYY-MM-DD)")
+    resolutions = _split_csv(resolution)
+    if not resolutions:
+        _usage_error("--resolution must list at least one resolution")
+    unknown = [item for item in resolutions if item not in RESOLUTIONS]
+    if unknown:
+        _usage_error(
+            f"unsupported resolution(s): {', '.join(unknown)} "
+            f"(expected one of: {', '.join(RESOLUTIONS)})"
+        )
+    try:
+        tables = compute_features(data, date, resolutions)
+        paths = write_features(tables, out, date)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from None
+    for resolution_name in resolutions:
+        table = tables.get(resolution_name)
+        rows = 0 if table is None else table.num_rows
+        files = sum(1 for path in paths if f"resolution={resolution_name}" in path.parts)
+        print(f"features {resolution_name}: {rows} rows, {files} files")
+
+
+@app.command()
+def verify(
+    manifest: Annotated[
+        str, typer.Option("--manifest", help="Manifest path or http(s) URL to verify.")
+    ],
+) -> None:
+    """Verify a published manifest against the files it describes."""
+    try:
+        report = verify_remote(manifest)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from None
+    _print_verify_report(report)
+    if report.problems:
+        raise typer.Exit(code=1)
