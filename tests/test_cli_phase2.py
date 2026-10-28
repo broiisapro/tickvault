@@ -318,14 +318,17 @@ def test_consume_passes_the_buffer_metrics_and_duration(
     assert metrics.servers[0].closed is True
 
 
-def test_features_reaches_the_stub() -> None:
+def test_features_reports_an_empty_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
     result = runner.invoke(
         app,
         ["features", "--data", "data", "--date", "2026-10-15", "--out", "features"],
     )
 
-    assert result.exit_code == 1
-    assert "error: features: implemented in wave 08" in result.stderr
+    assert result.exit_code == 0, result.output
+    output = _plain(result.output)
+    assert "features 1s: 0 rows, 0 files" in output
+    assert "features 1m: 0 rows, 0 files" in output
 
 
 @pytest.mark.parametrize(
