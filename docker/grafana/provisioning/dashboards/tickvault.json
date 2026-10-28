@@ -1,0 +1,292 @@
+{
+  "uid": "tickvault",
+  "title": "TickVault",
+  "description": "Pipeline health for the TickVault ingester and buffer writer (decision A71).",
+  "tags": ["tickvault"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "10s",
+  "time": {"from": "now-15m", "to": "now"},
+  "annotations": {"list": []},
+  "templating": {"list": []},
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Raw messages/s by venue",
+      "description": "tickvault_messages_total: raw venue messages the ingester received.",
+      "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {"type": "linear"},
+            "stacking": {"mode": "none", "group": "A"}
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"hideZeros": false, "mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+          "expr": "sum by (venue) (rate(tickvault_messages_total[1m]))",
+          "legendFormat": "{{venue}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Normalized rows/s by table",
+      "description": "tickvault_rows_total: rows the normalizer and writer produced, per table.",
+      "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {"type": "linear"},
+            "stacking": {"mode": "none", "group": "A"}
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"hideZeros": false, "mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+          "expr": "sum by (table) (rate(tickvault_rows_total[1m]))",
+          "legendFormat": "{{table}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Data-quality events/s by type",
+      "description": "tickvault_events_total: gaps, resyncs, checksum failures, invariant violations, reconnects and disconnects.",
+      "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {"type": "linear"},
+            "stacking": {"mode": "none", "group": "A"}
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"hideZeros": false, "mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+          "expr": "sum by (venue, event_type) (rate(tickvault_events_total[1m]))",
+          "legendFormat": "{{venue}} {{event_type}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Books LIVE",
+      "description": "tickvault_book_live: 1 when the book is LIVE, 0 while SYNCING.",
+      "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {"text": "SYNCING", "color": "red", "index": 1},
+                "1": {"text": "LIVE", "color": "green", "index": 0}
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+          "expr": "tickvault_book_live",
+          "legendFormat": "{{venue}}/{{symbol}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Seconds since last raw message by venue",
+      "description": "tickvault_last_message_age_seconds: silence means a stalled feed.",
+      "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {"type": "linear"},
+            "stacking": {"mode": "none", "group": "A"}
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"hideZeros": false, "mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+          "expr": "tickvault_last_message_age_seconds",
+          "legendFormat": "{{venue}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Writer buffer lag (messages)",
+      "description": "tickvault_buffer_lag_messages: raw records published but not yet consumed.",
+      "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {"type": "linear"},
+            "stacking": {"mode": "none", "group": "A"}
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"hideZeros": false, "mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+          "expr": "tickvault_buffer_lag_messages",
+          "legendFormat": "lag",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Writer buffer consume rate (messages/s)",
+      "description": "tickvault_buffer_consumed_total: raw records the writer took from the buffer.",
+      "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {"type": "linear"},
+            "stacking": {"mode": "none", "group": "A"}
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"hideZeros": false, "mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "tickvault-prometheus"},
+          "expr": "rate(tickvault_buffer_consumed_total[1m])",
+          "legendFormat": "consumed",
+          "range": true
+        }
+      ]
+    }
+  ]
+}
