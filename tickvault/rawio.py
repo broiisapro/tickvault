@@ -33,13 +33,34 @@ _SORT_RUN_LINES = 65_536
 
 @dataclass
 class RawReadStats:
-    """Counters collected while reading raw files."""
+    """Counters collected while reading raw files.
+
+    ``duplicates`` counts lines skipped because they repeat the previously
+    yielded line byte for byte under the same canonical key; ``conflicts``
+    counts lines that share that key but carry different bytes and are
+    therefore yielded, not hidden.
+    """
 
     files: int = 0
     messages: int = 0
     truncated_files: int = 0
     truncated_lines: int = 0
     bad_lines: int = 0
+    duplicates: int = 0
+    conflicts: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _RawLine:
+    """One envelope as stored, next to its decoded form.
+
+    Duplicate detection compares the bytes actually on disk, so the decoded
+    message alone is not enough: two lines can decode to the same message and
+    still differ in whitespace or key order.
+    """
+
+    message: RawMessage
+    raw: bytes
 
 
 def encode_line(message: RawMessage) -> bytes:
@@ -106,6 +127,10 @@ def _sort_key(message: RawMessage) -> tuple[int, str, int]:
     return (message.recv_ts_ns, message.connection_id, message.ingest_seq)
 
 
+def _line_sort_key(line: _RawLine) -> tuple[int, str, int]:
+    return _sort_key(line.message)
+
+
 def iter_raw(
     path_or_dir: str | Path, *, stats: RawReadStats | None = None
 ) -> Iterator[RawMessage]:
@@ -120,14 +145,25 @@ def iter_raw(
     straight out; a file containing an out-of-order line is sorted first with
     a bounded-memory external sort. Both per-file paths preserve the original
     order of equal keys, so the result is identical to materializing every
-    message and stable-sorting the concatenation. A truncated final line or
-    frame is skipped and counted in ``stats`` instead of raised. Pass a
-    :class:`RawReadStats` instance to observe counters; ``stats.files`` counts
-    files as they are opened and ``stats.messages`` counts messages as they
-    are yielded. A consumer that stops early closes the merge iterator and
-    every per-file stream in a ``finally``, so file handles and the
-    external-sort temporary directory are released immediately instead of
-    when the garbage collector finalizes the abandoned generators.
+    message and stable-sorting the concatenation.
+
+    At-least-once buffered delivery (decision A70) lets a writer restart
+    repeat an envelope in the same file or in a later one. Because equal keys
+    are adjacent in canonical order, a line is dropped as a duplicate when its
+    canonical key and its stored bytes both equal the previously yielded
+    line's; it is counted in ``stats.duplicates``. A line with the same key
+    but different bytes is a conflict: it is yielded so the divergence stays
+    visible and counted in ``stats.conflicts``. Only one line is kept for the
+    comparison, so de-duplication does not materialize a file. A truncated
+    final line or frame is skipped and counted in ``stats`` instead of raised.
+
+    Pass a :class:`RawReadStats` instance to observe counters;
+    ``stats.files`` counts files as they are opened and ``stats.messages``
+    counts messages as they are yielded (duplicates are not yielded). A
+    consumer that stops early closes the merge iterator and every per-file
+    stream in a ``finally``, so file handles and the external-sort temporary
+    directory are released immediately instead of when the garbage collector
+    finalizes the abandoned generators.
     """
     stats = RawReadStats() if stats is None else stats
     path = Path(path_or_dir)
@@ -135,18 +171,28 @@ def iter_raw(
         raise FileNotFoundError(path)
     files = [path] if path.is_file() else sorted(path.rglob("*.jsonl.zst"))
     streams = [_sorted_file(file_path, stats) for file_path in files]
-    merged = heapq.merge(*streams, key=_sort_key)
+    merged = heapq.merge(*streams, key=_line_sort_key)
+    previous: _RawLine | None = None
+    previous_key: tuple[int, str, int] | None = None
     try:
-        for message in merged:
+        for line in merged:
+            key = _line_sort_key(line)
+            if previous is not None and key == previous_key:
+                if line.raw == previous.raw:
+                    stats.duplicates += 1
+                    continue
+                stats.conflicts += 1
+            previous = line
+            previous_key = key
             stats.messages += 1
-            yield message
+            yield line.message
     finally:
         merged.close()
         for stream in streams:
             stream.close()
 
 
-def _sorted_file(path: Path, stats: RawReadStats) -> Generator[RawMessage, None, None]:
+def _sorted_file(path: Path, stats: RawReadStats) -> Generator[_RawLine, None, None]:
     """Yield one file's messages in canonical order with bounded memory.
 
     Whether the file is ordered has to be known before its first message is
@@ -173,15 +219,15 @@ def _file_is_ordered(path: Path) -> bool:
     counters are only incremented by the pass that yields messages.
     """
     previous: tuple[int, str, int] | None = None
-    for message in _iter_file(path, RawReadStats()):
-        key = _sort_key(message)
+    for line in _iter_file(path, RawReadStats()):
+        key = _line_sort_key(line)
         if previous is not None and key < previous:
             return False
         previous = key
     return True
 
 
-def _sorted_file_via_runs(path: Path, stats: RawReadStats) -> Iterator[RawMessage]:
+def _sorted_file_via_runs(path: Path, stats: RawReadStats) -> Iterator[_RawLine]:
     """Sort ``path`` exactly: spill stable sorted runs, then merge them.
 
     The file is decoded once, in file order. Runs of at most
@@ -196,18 +242,24 @@ def _sorted_file_via_runs(path: Path, stats: RawReadStats) -> Iterator[RawMessag
         runs = _write_sorted_runs(path, stats, Path(directory))
         streams = [_iter_run(run_path) for run_path in runs]
         try:
-            yield from heapq.merge(*streams, key=_sort_key)
+            yield from heapq.merge(*streams, key=_line_sort_key)
         finally:
             for stream in streams:
                 stream.close()
 
 
 def _write_sorted_runs(path: Path, stats: RawReadStats, directory: Path) -> list[Path]:
-    """Decode ``path`` once and spill its messages as stable sorted run files."""
+    """Decode ``path`` once and spill its lines as stable sorted run files.
+
+    The buffer keeps each line's canonical key and its stored bytes, not the
+    decoded message, so a run holds at most ``_SORT_RUN_LINES`` lines of the
+    file rather than two representations of them. Equal keys keep their
+    original position through the stable sort.
+    """
     runs: list[Path] = []
-    buffer: list[RawMessage] = []
-    for message in _iter_file(path, stats):
-        buffer.append(message)
+    buffer: list[tuple[tuple[int, str, int], bytes]] = []
+    for line in _iter_file(path, stats):
+        buffer.append((_line_sort_key(line), line.raw))
         if len(buffer) >= _SORT_RUN_LINES:
             runs.append(_spill_run(directory, len(runs), buffer))
             buffer = []
@@ -216,24 +268,37 @@ def _write_sorted_runs(path: Path, stats: RawReadStats, directory: Path) -> list
     return runs
 
 
-def _spill_run(directory: Path, index: int, messages: list[RawMessage]) -> Path:
-    """Sort ``messages`` stably in place and write them as one run file."""
-    messages.sort(key=_sort_key)
+def _entry_key(entry: tuple[tuple[int, str, int], bytes]) -> tuple[int, str, int]:
+    return entry[0]
+
+
+def _spill_run(
+    directory: Path, index: int, entries: list[tuple[tuple[int, str, int], bytes]]
+) -> Path:
+    """Sort ``entries`` stably in place and write their stored lines as one run.
+
+    The bytes are written verbatim — a complete line never contains a raw
+    newline, because the reader splits on newlines — so a run file is an
+    uncompressed copy of the file's lines in canonical order.
+    """
+    entries.sort(key=_entry_key)
     run_path = directory / f"run-{index:06d}.jsonl"
     with run_path.open("wb") as handle:
-        for message in messages:
-            handle.write(encode_line(message))
+        for _, raw in entries:
+            handle.write(raw)
+            handle.write(b"\n")
     return run_path
 
 
-def _iter_run(run_path: Path) -> Generator[RawMessage, None, None]:
-    """Yield the messages of one spilled run file in its stored order."""
+def _iter_run(run_path: Path) -> Generator[_RawLine, None, None]:
+    """Yield the lines of one spilled run file in its stored order."""
     with run_path.open("rb") as handle:
         for line in handle:
-            yield decode_line(line.rstrip(b"\n"))
+            raw = line.rstrip(b"\n")
+            yield _RawLine(message=decode_line(raw), raw=raw)
 
 
-def _iter_file(path: Path, stats: RawReadStats) -> Iterator[RawMessage]:
+def _iter_file(path: Path, stats: RawReadStats) -> Iterator[_RawLine]:
     buffer = bytearray()
     truncated_frame = False
     with path.open("rb") as handle:
@@ -259,7 +324,7 @@ def _iter_file(path: Path, stats: RawReadStats) -> Iterator[RawMessage]:
         stats.truncated_lines += 1
 
 
-def _drain_lines(buffer: bytearray, stats: RawReadStats) -> Iterator[RawMessage]:
+def _drain_lines(buffer: bytearray, stats: RawReadStats) -> Iterator[_RawLine]:
     while True:
         newline = buffer.find(b"\n")
         if newline < 0:
@@ -267,6 +332,8 @@ def _drain_lines(buffer: bytearray, stats: RawReadStats) -> Iterator[RawMessage]
         line = bytes(buffer[:newline])
         del buffer[: newline + 1]
         try:
-            yield decode_line(line)
+            message = decode_line(line)
         except ValueError:
             stats.bad_lines += 1
+            continue
+        yield _RawLine(message=message, raw=line)
