@@ -77,6 +77,8 @@ polars==1.44.2
     # via tickvault
 polars-runtime-32==1.44.2
     # via polars
+prometheus-client==0.26.0
+    # via tickvault
 protobuf==6.33.6
     # via streamlit
 pyarrow==26.0.0
