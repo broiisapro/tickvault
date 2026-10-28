@@ -211,12 +211,12 @@ def test_hour_choice_uses_the_hour_with_most_rows(replayed_root: Path, tmp_path:
     assert _sample_path(out, "trades", "coinbase").is_file()
 
 
-def _write_hour_choice_tree(root: Path) -> None:
+def _write_hour_choice_tree(root: Path, later_trades: int) -> None:
     """Trades and one symbol-bearing event in three hours of one day."""
     trades: list[Trade] = []
     events: list[Event] = []
     sequence = 0
-    for hour, count in ((3, 3), (5, 7), (7, 7)):
+    for hour, count in ((3, 3), (5, 7), (7, later_trades)):
         start = parse_rfc3339_ns(f"{DATE}T{hour:02d}:05:00Z")
         for index in range(count):
             trades.append(
@@ -253,9 +253,21 @@ def _write_hour_choice_tree(root: Path) -> None:
     writer.close()
 
 
-def test_hour_choice_prefers_more_rows_then_the_earliest_hour(tmp_path: Path) -> None:
+def test_hour_choice_prefers_the_later_hour_with_more_rows(tmp_path: Path) -> None:
     root = tmp_path / "data"
-    _write_hour_choice_tree(root)
+    _write_hour_choice_tree(root, later_trades=9)
+
+    out = tmp_path / "sample"
+    assert _build(root, out) == 0
+
+    assert _payload(out)["hour"] == "07"
+    assert _sample_path(out, "trades", "kraken", hour="07").is_file()
+    assert not (out / "norm" / "trades" / "venue=kraken" / f"date={DATE}" / "hour=05").exists()
+
+
+def test_hour_choice_breaks_a_tie_with_the_earliest_hour(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    _write_hour_choice_tree(root, later_trades=7)
 
     out = tmp_path / "sample"
     assert _build(root, out) == 0
@@ -270,6 +282,40 @@ def test_hour_choice_prefers_more_rows_then_the_earliest_hour(tmp_path: Path) ->
     assert events.column("symbol").to_pylist() == [SYMBOL]
     assert events.column("detail").to_pylist() == ['{"hour":"05"}']
     assert not (out / "norm" / "trades" / "venue=kraken" / f"date={DATE}" / "hour=07").exists()
+
+
+def test_builder_keeps_only_the_requested_symbol(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    start = parse_rfc3339_ns(f"{DATE}T05:05:00Z")
+    trades = [
+        Trade(
+            venue="kraken",
+            symbol=symbol,
+            exchange_ts_ns=start + index,
+            recv_ts_ns=start + index,
+            connection_id="kraken-conn",
+            ingest_seq=index,
+            trade_id=f"{symbol}-{index}",
+            price=Decimal("100"),
+            size=Decimal("1"),
+            side="buy",
+        )
+        for index, symbol in enumerate(["ETH-USD"] * 4 + [SYMBOL] * 5)
+    ]
+    writer = ParquetWriter(root)
+    writer.write("trades", trades)
+    writer.close()
+
+    out = tmp_path / "sample"
+    assert _build(root, out, "--hour", "05") == 0
+
+    payload = _payload(out)
+    assert payload["rows"] == {"book_deltas": 0, "book_snapshots": 0, "events": 0, "trades": 5}
+    assert payload["symbol"] == SYMBOL
+    copied = pq.read_table(_sample_path(out, "trades", "kraken", hour="05"))
+    assert copied.num_rows == 5
+    assert set(copied.column("symbol").to_pylist()) == {SYMBOL}
+    assert copied.column("trade_id").to_pylist() == [f"{SYMBOL}-{index}" for index in range(4, 9)]
 
 
 def test_sample_json_records_the_input_qa_summary(replayed_root: Path, tmp_path: Path) -> None:
