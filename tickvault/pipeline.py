@@ -39,8 +39,9 @@ requests it produces to the control topic, and commits an offset only after
 the raw writer has flushed everything up to it. A writer restarted after a
 crash therefore replays the uncommitted tail instead of losing it; it drops the
 envelopes whose ``(connection_id, ingest_seq)`` it already wrote in that
-process, asks the still-connected ingester for a fresh snapshot the first time
-a symbol has no LIVE book, and reports its backlog through the buffer-lag gauge.
+process, resumes in the same raw tree beside the earlier process's files, asks
+the still-connected ingester for a fresh snapshot the first time a symbol has
+no LIVE book, and reports its backlog through the buffer-lag gauge.
 
 ``metrics`` is observability only: every ``None`` default leaves the Phase 1
 code path byte-identical.
@@ -64,7 +65,7 @@ from tickvault.models import NormalizedMessage, RawMessage
 from tickvault.normalize import NormalizeError
 from tickvault.rawio import decode_line, encode_line, iter_raw
 from tickvault.storage.parquet_writer import ParquetWriter
-from tickvault.storage.raw_writer import RawWriter, _OpenFile
+from tickvault.storage.raw_writer import RawWriter
 from tickvault.venues import VENUES, ConnectorFactory
 
 _LOGGER = logging.getLogger(__name__)
@@ -822,25 +823,6 @@ async def _discard_records(
         await queue.get()
 
 
-class _ResumingRawWriter(RawWriter):
-    """Raw writer that continues after a crashed writer in the same data root.
-
-    A writer restarted on the same ``out`` finds the previous process's raw
-    files for a connection and receive hour already on disk. Raw files are
-    created exclusively and never reopened, so instead of failing this writer
-    moves on to the next free rotation number: the earlier file (which may end
-    in a truncated zstd frame) is left exactly as the crashed process left it,
-    and the records replayed from the uncommitted offset land in a new file.
-    """
-
-    def _open_rotated(self, message: RawMessage, *, rotation: int) -> _OpenFile:
-        while True:
-            try:
-                return super()._open_rotated(message, rotation=rotation)
-            except FileExistsError:
-                rotation += 1
-
-
 class _ConsumePosition:
     """Where the writer has got to on the raw topic, for the lag gauge.
 
@@ -888,7 +870,9 @@ async def run_writer(
     ``duration``, ``stop_event``, SIGTERM and SIGINT stop it gracefully: the raw
     writer is flushed, the last offset committed, and the writers and the buffer
     closed. An unexpected exception or cancellation closes the writers and the
-    buffer without committing, so the next writer replays that tail.
+    buffer without committing, so the next writer replays that tail. The raw
+    writer is built with ``resume=True``, so a restart in the same data root
+    continues beside the previous process's files instead of failing on them.
 
     ``metrics`` counts consumed records and, at most once per second, sets
     ``tickvault_buffer_lag_messages`` from :meth:`Buffer.end_offset` minus the
@@ -900,7 +884,7 @@ async def run_writer(
     stopper = _Stopper(stop_event if stop_event is not None else asyncio.Event())
     loop = asyncio.get_running_loop()
     await buffer.start()
-    raw_writer = _ResumingRawWriter(out_path)
+    raw_writer = RawWriter(out_path, resume=True)
     parquet = ParquetWriter(out_path, idle_flush_s=_LIVE_IDLE_FLUSH_S)
     books = _BookStates()
     recorder = _Recorder(BookProcessor(), parquet, metrics=metrics, books=books)

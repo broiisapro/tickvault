@@ -5,7 +5,10 @@ per ``connection_id``; the path is derived from the message's ``recv_ts_ns``
 hour (:func:`tickvault.paths.raw_file_path`). When a message's receive hour
 differs from the open file's hour the file is closed and the next one opened
 with ``rotation + 1``. Files are created with exclusive-create mode (``"xb"``)
-and never reopened, so no code path can overwrite raw data.
+and never reopened, so no code path can overwrite raw data; a writer built with
+``resume=True`` steps past the rotations an earlier process already used
+instead of failing, which is how a restarted writer continues in the same data
+root.
 
 Each file is a single zstd frame built by a streaming compressor.
 :meth:`RawWriter.flush` emits a block flush (``FLUSH_BLOCK``), so everything
@@ -55,10 +58,19 @@ class RawWriter:
     ``root`` is the data root; files land under ``root/raw/``. ``write`` opens
     the first file of a connection lazily; ``flush`` makes everything written
     so far decodable; ``close`` ends every frame and is idempotent.
+
+    ``resume=True`` continues after an earlier process wrote files for the same
+    connection and receive hour: instead of failing on the existing exclusive
+    path, the writer opens the next free rotation number, so the earlier file
+    (which may end in a truncated frame) is left exactly as that process left
+    it and today's records land beside it. The default ``resume=False`` still
+    raises :class:`FileExistsError`, which is what a single writable data root
+    should do.
     """
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, resume: bool = False) -> None:
         self._root = Path(root)
+        self._resume = resume
         self._open_files: dict[str, _OpenFile] = {}
         self._finished_bytes = 0
         self._closed = False
@@ -80,7 +92,7 @@ class RawWriter:
         """Append ``message`` to its connection's file, rotating by hour.
 
         Raises :class:`FileExistsError` if the target path already exists and
-        :class:`RuntimeError` if the writer is closed.
+        ``resume`` is off, and :class:`RuntimeError` if the writer is closed.
         """
         if self._closed:
             raise RuntimeError("RawWriter is closed")
@@ -140,22 +152,31 @@ class RawWriter:
         return self._open_rotated(message, rotation=previous.rotation + 1)
 
     def _open_rotated(self, message: RawMessage, *, rotation: int) -> _OpenFile:
-        path = raw_file_path(
-            self._root,
-            message.venue,
-            message.connection_id,
-            message.recv_ts_ns,
-            rotation,
-        )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = path.open("xb")
-        stream = zstd.ZstdCompressor().stream_writer(handle, closefd=False)
-        opened = _OpenFile(
-            path=path,
-            handle=handle,
-            stream=stream,
-            rotation=rotation,
-            last_flush_ns=message.recv_ts_ns,
-        )
-        self._open_files[message.connection_id] = opened
-        return opened
+        while True:
+            path = raw_file_path(
+                self._root,
+                message.venue,
+                message.connection_id,
+                message.recv_ts_ns,
+                rotation,
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                handle = path.open("xb")
+            except FileExistsError:
+                if not self._resume:
+                    raise
+                # An earlier process already wrote this connection/hour: take
+                # the next free rotation instead of touching its file.
+                rotation += 1
+                continue
+            stream = zstd.ZstdCompressor().stream_writer(handle, closefd=False)
+            opened = _OpenFile(
+                path=path,
+                handle=handle,
+                stream=stream,
+                rotation=rotation,
+                last_flush_ns=message.recv_ts_ns,
+            )
+            self._open_files[message.connection_id] = opened
+            return opened
