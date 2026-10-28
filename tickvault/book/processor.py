@@ -332,16 +332,21 @@ class BookProcessor:
     def _verify_checksum(self, state: _SymbolState, update: BookUpdate) -> int | None:
         """Truncate a registered venue's book to its depth and hash it.
 
-        Returns the computed checksum, or ``None`` when the venue is not in the
-        registry or the message carries no checksum to compare against.
+        The book is passed to the checksum function at the venue's registered
+        depth, not at a fixed top-10: Bitfinex hashes 25 levels per side, and a
+        checksum function that only wants fewer (Kraken slices its own top 10)
+        ignores the tail itself. Returns the computed checksum, or ``None``
+        when the venue is not in the registry or the message carries no
+        checksum to compare against.
         """
         checksum_fn = self.checksum_registry.get(state.venue)
         if checksum_fn is None:
             return None
-        state.book.truncate(self.checksum_depths[state.venue])
+        depth = self.checksum_depths[state.venue]
+        state.book.truncate(depth)
         if update.checksum is None:
             return None
-        bids, asks = state.book.top(_TOP_LEVELS)
+        bids, asks = state.book.top(depth)
         return checksum_fn(bids, asks)
 
     def _flag_checksum_failure(
