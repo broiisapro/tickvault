@@ -221,6 +221,7 @@ def test_cli_features_reproduces_the_dagster_bytes(
     replayed: _Replayed, tmp_path: Path
 ) -> None:
     out = tmp_path / "cli-out"
+    before = _input_hashes(replayed.root)
     result = CliRunner().invoke(
         app,
         [
@@ -238,8 +239,9 @@ def test_cli_features_reproduces_the_dagster_bytes(
     output = _plain(result.output)
     rows_1s = int(str(replayed.metadata["features"]["rows_1s"]))
     rows_1m = int(str(replayed.metadata["features"]["rows_1m"]))
-    assert f"features 1s: {rows_1s} rows, 2 files" in output
-    assert f"features 1m: {rows_1m} rows, 2 files" in output
+    assert f"features 1s: {rows_1s} rows, {len(_VENUES)} files" in output
+    assert f"features 1m: {rows_1m} rows, {len(_VENUES)} files" in output
+    assert _input_hashes(replayed.root) == before
 
     dagster_tree = _features_tree_hashes(replayed.root)
     cli_tree = _features_tree_hashes(out)
@@ -249,9 +251,8 @@ def test_cli_features_reproduces_the_dagster_bytes(
 
 
 def test_input_trees_are_unchanged(replayed: _Replayed) -> None:
-    # Hash the same trees again after every entry point above has read from
-    # them, so the assertion covers the CLI run as well as the daily job.
-    assert _input_hashes(replayed.root) == replayed.before
+    # The Job's own effect: hashed right after materialization, when the
+    # features tree exists and the CLI has not run yet.
     assert replayed.after == replayed.before
     assert any(name.startswith("raw/") for name in replayed.before)
     assert any(name.startswith("norm/") for name in replayed.before)
