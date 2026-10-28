@@ -235,8 +235,9 @@ File layout:
   30-minute capture starts and ends mid-second, so the first and last partial
   seconds of the span differ by venue. Coverage of book state is 100 % for
   Coinbase's 1-second bars and 98.5 % for Kraken's: the sample's Kraken feed
-  drops at 17:28:57 and reconnects at 17:29:29, so the 27 bars from 17:29:02
-  to 17:29:28 are more than 5 s past the last sample and correctly have null
+  stops delivering samples after 17:28:57 (the socket is reported lost at
+  17:29:27 and reconnects at 17:29:29), so the 27 bars starting 17:29:02 to
+  17:29:28 are more than 5 s past the last sample and correctly have null
   book columns. The final 1-minute bar closes 31 s after the last sample and
   is null for the same reason.
 - **The end-to-end test compacts its replayed root before materializing the
@@ -292,7 +293,7 @@ bar_start_utc        best_bid  best_ask  mid        spread_bps             depth
 2026-10-15 17:12:00  82094.23  82094.24  82094.235  0.0012181123315175542  -0.3148907011266394  1792084379043509000          280  1.02045724    -0.46067244  82112.52767257097  0.0006767521716519581
 ```
 
-The book sample used is the five-level snapshot at
+The book sample used is the snapshot with five levels per side at
 `exchange_ts_ns = 1792084379043509000`, 0.956 s before the bar's
 `bar_end_ns = 1792084380000000000` and therefore fresh:
 
