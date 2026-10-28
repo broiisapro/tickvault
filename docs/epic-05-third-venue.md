@@ -364,7 +364,7 @@ coinbase           706
   significant digits where two shortest representations both round-trip; the
   venue sends far fewer digits, and the recorded fixture's 91 live checksums all
   match.
-- Only spot/margin order books at `P0`/`len=25` and `te` trades are in scope.
+- Only the spot `book` channel at `P0`/`len=25` and `te` trades are in scope.
   Bitfinex funding, derivatives, `R0` books and authenticated channels are out
   of scope, as is Tardis reconciliation for Bitfinex (Phase 1 reconciles
   Coinbase only, A35).
