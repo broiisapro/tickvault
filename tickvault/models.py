@@ -243,6 +243,40 @@ TABLES: dict[str, pa.Schema] = {
     "events": EVENTS_SCHEMA,
 }
 
+FEATURES_TABLE = "features"
+"""Name of the derived feature table, written outside the normalized layer."""
+
+_FLOAT64 = pa.float64()
+
+FEATURES_SCHEMA = pa.schema(
+    [
+        _field("venue", _STRING, nullable=False),
+        _field("symbol", _STRING, nullable=False),
+        _field("resolution", _STRING, nullable=False),
+        _field("bar_start_ns", _INT64, nullable=False),
+        _field("bar_end_ns", _INT64, nullable=False),
+        _field("best_bid", _FLOAT64, nullable=True),
+        _field("best_ask", _FLOAT64, nullable=True),
+        _field("mid", _FLOAT64, nullable=True),
+        _field("spread_bps", _FLOAT64, nullable=True),
+        _field("depth_imbalance_5", _FLOAT64, nullable=True),
+        _field("book_sample_ts_ns", _INT64, nullable=True),
+        _field("trade_count", _INT64, nullable=False),
+        _field("volume", _FLOAT64, nullable=False),
+        _field("signed_volume", _FLOAT64, nullable=False),
+        _field("vwap", _FLOAT64, nullable=True),
+        _field("realized_vol", _FLOAT64, nullable=True),
+    ]
+)
+"""Schema of the derived features table (decision A68).
+
+Features are research values, so they are ``float64`` (the exact
+``decimal128(38, 18)`` prices stay in the normalized tables) and counts are
+``int64``. The table is deliberately **not** part of :data:`TABLES`: it is
+derived analytics written under ``features/``, so compaction, manifests and QA
+are unchanged.
+"""
+
 
 def to_arrow(table: str | pa.Schema, records: Sequence[NormalizedRecord]) -> pa.Table:
     """Convert ``records`` to a :class:`pyarrow.Table` with ``table``'s schema.
