@@ -107,11 +107,11 @@ def _assert_prefix_is_unchanged(
 
 
 def _span_start(full: dict[str, pa.Table]) -> int:
-    return int(str(full["1s"].column("bar_start_ns")[0]))
+    return int(str(pc.min(full["1s"].column("bar_start_ns")).as_py()))
 
 
 def _span_end(full: dict[str, pa.Table]) -> int:
-    return int(str(full["1s"].column("bar_end_ns")[-1]))
+    return int(str(pc.max(full["1s"].column("bar_end_ns")).as_py()))
 
 
 def test_reference_has_bars_at_both_resolutions(full_features: dict[str, pa.Table]) -> None:
@@ -179,6 +179,8 @@ def test_cutoff_after_the_last_row_changes_nothing(
     deadline=None,
 )
 @given(
+    # Whole seconds are the interesting cutoffs: every bar boundary is one, so
+    # the property lands exactly on the ``<`` in ``exchange_ts_ns < bar_end_ns``.
     offset_seconds=st.integers(min_value=0, max_value=300),
 )
 def test_prefix_property_over_cutoffs(
