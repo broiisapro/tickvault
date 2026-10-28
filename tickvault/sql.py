@@ -37,12 +37,13 @@ _FEATURES_HIVE_TYPES = "{'resolution': 'VARCHAR', 'venue': 'VARCHAR', 'date': 'D
 
 
 def view_ddl(root: str | Path) -> str:
-    """Return the ``CREATE VIEW`` statements for ``root``, one per table.
+    """Return the ``CREATE VIEW`` statements for ``root``.
 
-    The text is a pure function of the data tree: a table with files gets the
-    ``read_parquet`` statement, a table without files the typed empty-view
-    statement. The ``features`` view is appended only when the features tree
-    holds files.
+    One statement per normalized table (``tickvault.models.TABLES``), plus the
+    optional ``features`` view. The text is a pure function of the data tree: a
+    table with files gets the ``read_parquet`` statement, a table without files
+    the typed empty-view statement. The ``features`` view is appended only when
+    the features tree holds files.
     """
     return "\n".join(_view_statements(root)) + "\n"
 
@@ -79,7 +80,12 @@ def _view_statements(root: str | Path) -> list[str]:
 
 
 def _create_features_view(root: Path) -> str | None:
-    """Return the features view statement, or ``None`` without a features tree."""
+    """Return the features view statement, or ``None`` without a features tree.
+
+    The tree follows the A68 layout
+    (``features/resolution=<r>/venue=<v>/date=<D>/part-<symbol>.parquet``), so
+    all three hive keys exist below ``features/``.
+    """
     directory = root / "features"
     if not any(directory.rglob("*.parquet")):
         return None
