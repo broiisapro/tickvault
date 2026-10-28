@@ -50,21 +50,19 @@ def built_sample(
     for raw in (coinbase_5m_path, kraken_5m_path):
         run_replay(raw, data)
     out = workspace / "sample"
-    assert (
-        build_public_sample(
-            [
-                "--data",
-                str(data),
-                "--date",
-                DATE,
-                "--out",
-                str(out),
-                "--hour",
-                HOUR,
-            ]
-        )
-        == 0
+    exit_code = build_public_sample(
+        [
+            "--data",
+            str(data),
+            "--date",
+            DATE,
+            "--out",
+            str(out),
+            "--hour",
+            HOUR,
+        ]
     )
+    assert exit_code == 0, f"build_public_sample exited {exit_code}"
     return out
 
 
