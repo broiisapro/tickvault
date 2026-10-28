@@ -708,3 +708,74 @@ def test_determinism_same_inputs_produce_identical_outputs() -> None:
         "resync",
         "disconnect",
     ]
+
+
+def test_default_checksum_map_comes_from_the_venue_registry() -> None:
+    processor = BookProcessor()
+
+    assert processor.checksum_registry == {"kraken": kraken_checksum}
+    assert processor.checksum_depths == {"kraken": 25}
+    assert processor.kraken_depth == 25
+
+
+def test_kraken_depth_argument_overrides_the_registered_depth() -> None:
+    processor = BookProcessor(kraken_depth=5)
+
+    assert processor.checksum_registry == {"kraken": kraken_checksum}
+    assert processor.checksum_depths == {"kraken": 5}
+
+
+def test_custom_checksum_map_controls_truncation_and_verification() -> None:
+    seen: list[tuple[int, int]] = []
+
+    def recording_checksum(bids: tuple[PriceLevel, ...], asks: tuple[PriceLevel, ...]) -> int:
+        seen.append((len(bids), len(asks)))
+        return 424242
+
+    processor = BookProcessor(checksums={"kraken": (recording_checksum, 2)})
+    output = processor.process(
+        msg(
+            _KRAKEN,
+            0,
+            venue="kraken",
+            channel="book",
+            book_updates=(
+                update(
+                    snapshot=True,
+                    bids=(lvl("100", "1"), lvl("99", "2"), lvl("98", "3")),
+                    asks=(lvl("101", "1"), lvl("102", "2"), lvl("103", "3")),
+                    checksum=424242,
+                ),
+            ),
+        )
+    )
+
+    assert seen == [(2, 2)]
+    assert output.events == []
+    assert {row.price for row in output.book_snapshots if row.source == "venue"} == {
+        Decimal("100"),
+        Decimal("99"),
+        Decimal("101"),
+        Decimal("102"),
+    }
+
+
+def test_an_empty_checksum_map_disables_verification() -> None:
+    processor = BookProcessor(checksums={})
+    bids = (lvl("100", "1"),)
+    asks = (lvl("101", "1"),)
+
+    output = processor.process(
+        msg(
+            _KRAKEN,
+            0,
+            venue="kraken",
+            channel="book",
+            book_updates=(update(snapshot=True, bids=bids, asks=asks, checksum=1),),
+        )
+    )
+
+    assert processor.checksum_registry == {}
+    assert processor.checksum_depths == {}
+    assert output.events == []
+    assert [row.side for row in output.book_snapshots if row.source == "venue"] == ["bid", "ask"]

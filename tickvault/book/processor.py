@@ -12,9 +12,11 @@ State-machine rules, from the architecture document, section 8:
 - Coinbase: ``sequence`` is tracked per ``connection_id``. A gap emits ``gap``
   and moves every symbol on that connection to SYNCING, and emits a resync
   request (live: unsubscribe+resubscribe ``level2`` for those products).
-- Kraken: after applying a message's levels and truncating to subscribed depth
-  (25), compute the checksum; mismatch → ``checksum_failure``, SYNCING, resync
-  request (live: unsubscribe+resubscribe ``book`` for that symbol).
+- Checksum-verified venues (the per-venue checksum map, Kraken today): after
+  applying a message's levels and truncating to the venue's checksum depth
+  (25 for Kraken), compute the checksum; mismatch → ``checksum_failure``,
+  SYNCING, resync request (live: unsubscribe+resubscribe ``book`` for that
+  symbol).
 - Invariants after every applied update: best bid < best ask, no negative
   size, no duplicate levels → ``invariant_violation``, SYNCING, resync
   request.
@@ -59,11 +61,10 @@ Implementation notes:
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from tickvault.book.invariants import check_invariants
-from tickvault.book.kraken_checksum import kraken_checksum
 from tickvault.book.orderbook import OrderBook
 from tickvault.book.sequence import GAP, STALE, SequenceTracker
 from tickvault.models import (
@@ -124,6 +125,13 @@ def _detail(**fields: object) -> str:
     return json.dumps(fields, sort_keys=True, separators=(",", ":"))
 
 
+def _default_checksums() -> dict[str, tuple[ChecksumFn, int]]:
+    """The venue registry's checksum map, imported lazily to avoid a cycle."""
+    from tickvault.venues import checksum_registry
+
+    return checksum_registry()
+
+
 def _message_exchange_ts_ns(msg: NormalizedMessage) -> int | None:
     if msg.book_updates:
         return msg.book_updates[0].exchange_ts_ns
@@ -150,16 +158,35 @@ def _control_symbols(control: dict[str, object] | None) -> list[str] | None:
 class BookProcessor:
     """Deterministic processor turning normalized messages into table rows.
 
-    ``kraken_depth`` is the Kraken book depth used for checksum truncation.
-    ``sample_interval_ns`` is the interval between top-10 ``sample`` snapshots
-    per symbol while LIVE.
+    ``kraken_depth`` is the Kraken book depth used for checksum truncation. It
+    overrides Kraken's registered ``checksum_depth`` when the default registry
+    is used, so callers that tune the depth keep working. ``sample_interval_ns``
+    is the interval between top-10 ``sample`` snapshots per symbol while LIVE.
+    ``checksums`` maps a venue name to its ``(checksum_fn, depth)`` pair; ``None``
+    means the venue registry's checksum map
+    (:func:`tickvault.venues.checksum_registry`), where a venue absent from the
+    map is not checksum-verified and keeps its full book depth. An explicit map
+    is used exactly as given, depths included.
     """
 
-    def __init__(self, kraken_depth: int = 25, sample_interval_ns: int = 1_000_000_000) -> None:
+    def __init__(
+        self,
+        kraken_depth: int = 25,
+        sample_interval_ns: int = 1_000_000_000,
+        checksums: Mapping[str, tuple[ChecksumFn, int]] | None = None,
+    ) -> None:
         self.kraken_depth = kraken_depth
         self.sample_interval_ns = sample_interval_ns
         self.stale_messages = 0
-        self.checksum_registry: dict[str, ChecksumFn] = {"kraken": kraken_checksum}
+        resolved = dict(checksums) if checksums is not None else _default_checksums()
+        if checksums is None and "kraken" in resolved:
+            resolved["kraken"] = (resolved["kraken"][0], kraken_depth)
+        self.checksum_registry: dict[str, ChecksumFn] = {
+            venue: checksum for venue, (checksum, _) in resolved.items()
+        }
+        self.checksum_depths: dict[str, int] = {
+            venue: depth for venue, (_, depth) in resolved.items()
+        }
         self._tracker = SequenceTracker()
         self._states: dict[tuple[str, str], _SymbolState] = {}
         self._connection_symbols: dict[str, set[str]] = {}
@@ -303,7 +330,7 @@ class BookProcessor:
         self._maybe_sample(msg, update, state, output)
 
     def _verify_checksum(self, state: _SymbolState, update: BookUpdate) -> int | None:
-        """Truncate a registered venue's book to the subscribed depth and hash it.
+        """Truncate a registered venue's book to its depth and hash it.
 
         Returns the computed checksum, or ``None`` when the venue is not in the
         registry or the message carries no checksum to compare against.
@@ -311,7 +338,7 @@ class BookProcessor:
         checksum_fn = self.checksum_registry.get(state.venue)
         if checksum_fn is None:
             return None
-        state.book.truncate(self.kraken_depth)
+        state.book.truncate(self.checksum_depths[state.venue])
         if update.checksum is None:
             return None
         bids, asks = state.book.top(_TOP_LEVELS)
