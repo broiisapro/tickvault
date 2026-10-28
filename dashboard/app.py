@@ -7,10 +7,13 @@ sample::
 
 The header says what TickVault is, links the source and describes the current
 data root in one caption: the bundled sample's venues, symbols and UTC span
-(computed from the data, never hard-coded) or the live path when
-``TICKVAULT_DATA_DIR`` is set. Every time window -- including the "messages/s
-last 5 min" tile -- is anchored to the newest record in the root, so an old
-sample renders exactly like a live root.
+(computed from the data, never hard-coded), or the configured path for any
+other root. The bundled sample is always named by its
+repository-relative path (``dashboard/sample``), never by an absolute path --
+including when ``TICKVAULT_DATA_DIR`` points at it -- so the hosted app does
+not leak the container's mount path. Every time window -- including the
+"messages/s last 5 min" tile -- is anchored to the newest record in the root,
+so an old sample renders exactly like a live root.
 
 The app opens a fresh in-memory DuckDB connection per query (the views are
 cheap) and caches every result with ``st.cache_data(ttl=10)``, so a live root
@@ -43,6 +46,7 @@ from tickvault.sql import connect  # noqa: E402
 
 _ENV_DATA_ROOT = "TICKVAULT_DATA_DIR"
 _SAMPLE_ROOT = Path(__file__).resolve().parent / "sample"
+_SAMPLE_LABEL = "dashboard/sample"
 _SERIES_ROWS = 2000
 _KPI_WINDOW_SECONDS = 300
 _CHART_WINDOW_SECONDS = 3600
@@ -50,9 +54,9 @@ _CACHE_TTL_S = 10
 _TITLE = "TickVault — crypto market-data quality"
 _SOURCE_URL = "https://github.com/broiisapro/tickvault"
 _INTRO = (
-    "TickVault streams level-2 order books and trades from Coinbase and Kraken, "
-    "stores every raw frame untouched and normalizes the feeds into hourly "
-    "Parquet, validating them for sequence gaps, Kraken CRC32 checksums and "
+    "TickVault streams level-2 order books and trades from public exchange "
+    "websockets, stores every raw frame untouched and normalizes the feeds into "
+    "hourly Parquet, validating them for sequence gaps, CRC32 checksums and "
     "book invariants. This page shows the resulting message throughput, "
     "quality events, top of book, spreads and per-day QA report for the "
     "current data root."
@@ -63,9 +67,37 @@ def _default_data_root() -> str:
     configured = os.environ.get(_ENV_DATA_ROOT)
     if configured:
         return configured
-    if _SAMPLE_ROOT.is_dir():
-        return str(_SAMPLE_ROOT)
-    return "dashboard/sample"
+    return _SAMPLE_LABEL
+
+
+def _resolve_root(text: str) -> Path | None:
+    """Resolve a data-root text from the sidebar to a path.
+
+    Relative text is first tried against the repository root, so the default
+    ``dashboard/sample`` works whatever directory Streamlit was started from,
+    then against the process working directory. Absolute text is used as is.
+    """
+    text = text.strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        candidate = _PROJECT_ROOT / path
+        if candidate.exists():
+            path = candidate
+    return path
+
+
+def _is_bundled_sample(root: Path | None) -> bool:
+    """True when ``root`` resolves to the committed ``dashboard/sample``."""
+    return root is not None and root.resolve() == _SAMPLE_ROOT.resolve()
+
+
+def _display_root_text(root_text: str) -> str:
+    """The sidebar text for the bundled sample, otherwise ``root_text`` as given."""
+    if _is_bundled_sample(_resolve_root(root_text)):
+        return _SAMPLE_LABEL
+    return root_text.strip()
 
 
 def _has_normalized_data(root: Path) -> bool:
@@ -148,18 +180,18 @@ def _ns_to_timestamp(nanoseconds: int) -> pd.Timestamp:
 
 def _root_caption(root_text: str, root: Path | None) -> str:
     """One line describing the current data root, computed from the data."""
-    if os.environ.get(_ENV_DATA_ROOT):
+    if not _is_bundled_sample(root):
         return f"Live data root: `{root_text}`"
     if root is None or not _has_normalized_data(root):
-        return f"Bundled sample: `{root_text}` (no normalized data yet)"
+        return f"Bundled sample: `{_SAMPLE_LABEL}` (no normalized data yet)"
     dimensions = _load_dimensions(str(root))
     span = _load_data_span(str(root))
     if dimensions.empty or span.empty:
-        return f"Bundled sample: `{root_text}` (no normalized data yet)"
+        return f"Bundled sample: `{_SAMPLE_LABEL}` (no normalized data yet)"
     first_value = span["first_ts_ns"].iloc[0]
     last_value = span["last_ts_ns"].iloc[0]
     if pd.isna(first_value) or pd.isna(last_value):
-        return f"Bundled sample: `{root_text}` (no normalized data yet)"
+        return f"Bundled sample: `{_SAMPLE_LABEL}` (no normalized data yet)"
     venues = ", ".join(sorted(dimensions["venue"].unique().tolist()))
     symbols = ", ".join(sorted(dimensions["symbol"].unique().tolist()))
     first = _ns_to_timestamp(int(first_value))
@@ -169,34 +201,41 @@ def _root_caption(root_text: str, root: Path | None) -> str:
         span_text = f"{first:%Y-%m-%d %H:%M:%S}\u2013{last:%H:%M:%S} UTC"
     else:
         span_text = f"{first:%Y-%m-%d %H:%M:%S}\u2013{last:%Y-%m-%d %H:%M:%S} UTC"
-    return f"Bundled sample: {venues} \u00b7 {symbols} \u00b7 {span_text} ({minutes} min)"
+    return (
+        f"Bundled sample: {venues} \u00b7 {symbols} \u00b7 {span_text} "
+        f"({minutes} min) \u00b7 `{_SAMPLE_LABEL}`"
+    )
 
 
 def main() -> None:
     st.set_page_config(page_title="TickVault", layout="wide")
 
+    initial_root_text = _display_root_text(_default_data_root())
     with st.sidebar:
         st.header("Data")
-        root_text = st.text_input("Data root", value=_default_data_root())
+        root_text = st.text_input("Data root", value=initial_root_text)
+        if _is_bundled_sample(_resolve_root(root_text)):
+            st.caption(f"Showing the bundled sample from `{_SAMPLE_LABEL}`.")
         st.caption(
             f"Results refresh every {_CACHE_TTL_S} s; each chart series is capped at "
             f"{_SERIES_ROWS} newest points."
         )
 
     root_text = root_text.strip()
-    root = Path(root_text).expanduser() if root_text else None
+    root = _resolve_root(root_text)
+    root_label = _SAMPLE_LABEL if _is_bundled_sample(root) else root_text
 
     st.title(_TITLE)
     st.markdown(_INTRO)
     st.markdown(f"[Source on GitHub]({_SOURCE_URL})")
-    st.caption(_root_caption(root_text, root))
+    st.caption(_root_caption(root_label, root))
 
     if root is None:
         st.info("Enter a TickVault data root in the sidebar.")
         return
     if not _has_normalized_data(root):
         st.info(
-            f"No normalized Parquet data under `{root}`. Replay a raw fixture with "
+            f"No normalized Parquet data under `{root_label}`. Replay a raw fixture with "
             "`tickvault replay`, or point `TICKVAULT_DATA_DIR` at a data root."
         )
         return
@@ -236,7 +275,7 @@ def main() -> None:
     if rate.empty:
         st.info("No trades or book deltas in the last hour of data.")
     else:
-        st.altair_chart(charts.message_rate_chart(rate), use_container_width=True)
+        st.altair_chart(charts.message_rate_chart(rate), width="stretch")
 
     st.subheader("Events by venue")
     events = _load_event_counts(str(root), selected_venues_tuple)
@@ -250,7 +289,7 @@ def main() -> None:
     if book.empty:
         st.info("No sample snapshots for the selected venues and symbols.")
     else:
-        st.altair_chart(charts.top_of_book_chart(book), use_container_width=True)
+        st.altair_chart(charts.top_of_book_chart(book), width="stretch")
 
     st.subheader("Spread and mid")
     spread = _load_spread_mid(str(root), selected_venues_tuple, selected_symbols_tuple)
@@ -258,8 +297,8 @@ def main() -> None:
         st.info("No sample snapshots for the selected venues and symbols.")
     else:
         left, right = st.columns(2)
-        left.altair_chart(charts.mid_price_chart(spread), use_container_width=True)
-        right.altair_chart(charts.spread_bps_chart(spread), use_container_width=True)
+        left.altair_chart(charts.mid_price_chart(spread), width="stretch")
+        right.altair_chart(charts.spread_bps_chart(spread), width="stretch")
 
     st.subheader("QA history")
     if qa.empty:
