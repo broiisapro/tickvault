@@ -15,9 +15,13 @@ how a restarted writer is simulated in tests.
 
 This module ships two implementations: :class:`MemoryBuffer`, fully working
 over an in-process :class:`MemoryBroker` (used by every test, since Docker is
-not in CI), and, from wave 08 on, ``tickvault.buffer_kafka.KafkaBuffer`` for a
-real broker on ``<host>:<port>``. :func:`open_buffer` chooses between them from
-the address alone, so callers never import a concrete implementation.
+not in CI), and ``tickvault.buffer_kafka.KafkaBuffer`` for a real broker on
+``<host>:<port>``. :func:`open_buffer` chooses between them from the address
+alone, so callers never import a concrete implementation.
+
+:meth:`Buffer.end_offset` reports how far ahead of the writer the raw topic is,
+which is what the writer's ``tickvault_buffer_lag_messages`` gauge is computed
+from.
 """
 
 from __future__ import annotations
@@ -77,6 +81,17 @@ class Buffer(Protocol):
 
     async def commit(self, offset: int) -> None:
         """Mark every raw record up to and including ``offset`` as handled."""
+        ...
+
+    async def end_offset(self) -> int | None:
+        """Next offset that would be written to :data:`RAW_TOPIC`.
+
+        The offset of the upcoming record, i.e. one past the last published
+        one, so a writer's lag in records is ``end_offset() - next_to_consume``.
+        ``None`` when the implementation cannot tell (for example a broker that
+        reports no end offset for the partition); the lag gauge then keeps its
+        previous value instead of reporting a made-up number.
+        """
         ...
 
     async def close(self) -> None:
@@ -175,6 +190,14 @@ class MemoryBuffer:
         """Record ``offset`` as durably handled (never moves backwards)."""
         self.broker.committed = max(self.broker.committed, offset)
 
+    async def end_offset(self) -> int | None:
+        """Next offset the broker would assign: the raw topic's length.
+
+        Commits never change it, so a writer behind the ingester sees exactly
+        the number of records still waiting to be handled.
+        """
+        return len(self.broker.raw)
+
     async def close(self) -> None:
         """End this buffer's iterators; the broker and other buffers stay usable."""
         self._closed = True
@@ -252,7 +275,7 @@ def open_buffer(address: str) -> Buffer:
     ``memory://<name>`` returns a :class:`MemoryBuffer` on the process-wide
     broker of that name (two calls with the same name share one broker), and
     ``<host>:<port>`` returns a Kafka buffer from
-    :mod:`tickvault.buffer_kafka`, which lands in wave 08.
+    :mod:`tickvault.buffer_kafka`.
     """
     if address.startswith("memory://"):
         name = address[len("memory://") :]
