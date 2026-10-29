@@ -34,7 +34,7 @@ services:
       - tickvault
       - ingest
       - --venues
-      - coinbase,kraken
+      - coinbase,kraken,bitfinex
       - --symbols
       - BTC-USD,ETH-USD
       - --out
