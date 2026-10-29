@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 
+from tickvault.book.bitfinex_checksum import bitfinex_checksum
 from tickvault.book.kraken_checksum import kraken_checksum
 from tickvault.book.processor import BookProcessor, ProcessorOutput
 from tickvault.models import BookUpdate, NormalizedMessage, PriceLevel, RawMessage, Trade
@@ -713,16 +714,22 @@ def test_determinism_same_inputs_produce_identical_outputs() -> None:
 def test_default_checksum_map_comes_from_the_venue_registry() -> None:
     processor = BookProcessor()
 
-    assert processor.checksum_registry == {"kraken": kraken_checksum}
-    assert processor.checksum_depths == {"kraken": 25}
+    assert processor.checksum_registry == {
+        "kraken": kraken_checksum,
+        "bitfinex": bitfinex_checksum,
+    }
+    assert processor.checksum_depths == {"kraken": 25, "bitfinex": 25}
     assert processor.kraken_depth == 25
 
 
 def test_kraken_depth_argument_overrides_the_registered_depth() -> None:
     processor = BookProcessor(kraken_depth=5)
 
-    assert processor.checksum_registry == {"kraken": kraken_checksum}
-    assert processor.checksum_depths == {"kraken": 5}
+    assert processor.checksum_registry == {
+        "kraken": kraken_checksum,
+        "bitfinex": bitfinex_checksum,
+    }
+    assert processor.checksum_depths == {"kraken": 5, "bitfinex": 25}
 
 
 def test_custom_checksum_map_controls_truncation_and_verification() -> None:
