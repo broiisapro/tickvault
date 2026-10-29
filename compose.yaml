@@ -46,6 +46,17 @@ services:
     ports:
       - "9108:9108"
     restart: unless-stopped
+    # Optional, because the buffer profile is off in the Phase 1 stack: with
+    # `required: false` the dependencies only apply when the services exist.
+    # They make the buffered ingester wait for a broker that is ready and
+    # already configured, instead of publishing into a half-started cluster.
+    depends_on:
+      redpanda:
+        condition: service_healthy
+        required: false
+      redpanda-init:
+        condition: service_completed_successfully
+        required: false
     volumes:
       - tickvault-data:/data
 
@@ -74,6 +85,8 @@ services:
     depends_on:
       redpanda:
         condition: service_healthy
+      redpanda-init:
+        condition: service_completed_successfully
     volumes:
       - tickvault-data:/data
 
@@ -105,6 +118,10 @@ services:
       - 0.0.0.0:33145
       - --advertise-rpc-addr
       - redpanda:33145
+    # The Admin API (9644) already listens on 0.0.0.0 in dev-container mode,
+    # which is what redpanda-init's `rpk cluster config` call needs; rpk's
+    # `--admin-addr` flag cannot be used here because it is passed through to
+    # the redpanda binary, which does not recognise it.
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
       interval: 10s
@@ -113,6 +130,32 @@ services:
       start_period: 20s
     volumes:
       - redpanda-data:/var/lib/redpanda/data
+
+  redpanda-init:
+    profiles: [buffer]
+    platform: linux/arm64
+    image: redpandadata/redpanda:v26.2.6
+    # Redpanda caps a record batch at 1 MiB (cluster `kafka_batch_max_bytes`)
+    # and a topic message at 1 MiB (`max.message.bytes`) by default. A
+    # Coinbase `level2` snapshot envelope is about 2.4 MB, so both limits are
+    # raised before the first client connects, and both topics are created
+    # here with the same shape the ingester would ask for (one partition,
+    # replication factor 1) so the topic-level limit applies from offset 0.
+    # `KafkaBuffer._create_topics` accepts already existing topics, and the
+    # cluster config lives in the redpanda-data volume, so a re-run is a no-op.
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        rpk -X admin.hosts=redpanda:9644 cluster config set \
+            kafka_batch_max_bytes 16777216 --no-confirm
+        rpk topic create tickvault.raw tickvault.control -p 1 -r 1 \
+            -c max.message.bytes=16777216 --brokers redpanda:9092 || true
+        rpk topic alter-config tickvault.raw tickvault.control \
+            --set max.message.bytes=16777216 --brokers redpanda:9092
+    restart: "no"
 
   prometheus:
     profiles: [metrics]
