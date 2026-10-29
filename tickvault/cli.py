@@ -181,7 +181,7 @@ def _print_verify_report(report: VerifyReport) -> None:
 @app.command()
 def ingest(
     venues: Annotated[
-        str, typer.Option("--venues", help="Comma-separated venues, e.g. coinbase,kraken.")
+        str, typer.Option("--venues", help="Comma-separated venues, e.g. coinbase,kraken,bitfinex.")
     ],
     symbols: Annotated[
         str, typer.Option("--symbols", help="Comma-separated BASE-QUOTE symbols.")
