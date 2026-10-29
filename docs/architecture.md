@@ -1,6 +1,6 @@
 # TickVault architecture
 
-Status: Phase 1 release (v1.0.0).
+Status: Phase 2 release (v1.1.0).
 
 ## 1. What it is
 
@@ -125,8 +125,8 @@ Common columns: `venue` (string), `symbol` (string, `BASE-QUOTE`), `exchange_ts_
 
 ## 11. Dependencies (declared once in Epic 0)
 
-Runtime: `websockets>=17.2`, `msgspec>=0.22`, `zstandard>=0.25`, `pyarrow>=26`, `polars>=1.30,<2` (Polars 2.0 shipped 2026-10-06 with row-order and dtype changes; stay on 1.x for Phase 1), `duckdb>=1.5.6,<2`, `typer>=0.27`, `sortedcontainers>=2.4`, `httpx>=0.28`.
-Groups: `dev` = `pytest>=9.1`, `hypothesis>=6.169`, `pytest-asyncio`, `ruff>=0.17`, `mypy>=2.4` (+ stubs as needed); `orchestration` = `dagster>=1.13.26,<2`, `dagster-webserver`; `dashboard` = `streamlit>=1.66`. `[tool.uv] default-groups = ["dev", "orchestration", "dashboard"]` so `uv sync --frozen` gives a full dev environment; Docker images sync only what they need.
+Runtime: `websockets>=17.2`, `msgspec>=0.22`, `zstandard>=0.25`, `pyarrow>=26`, `polars>=1.30,<2` (Polars 2.0 shipped 2026-10-06 with row-order and dtype changes; stay on 1.x for Phase 1), `duckdb>=1.5.6,<2`, `typer>=0.27`, `sortedcontainers>=2.4`, `httpx>=0.28`, `prometheus-client>=0.26.0`.
+Groups: `dev` = `pytest>=9.1`, `hypothesis>=6.169`, `pytest-asyncio`, `ruff>=0.17`, `mypy>=2.4` (+ stubs as needed); `orchestration` = `dagster>=1.13.26,<2`, `dagster-webserver`; `dashboard` = `streamlit>=1.66`; `buffer` = `aiokafka>=0.14,<0.15`. `[tool.uv] default-groups = ["dev", "orchestration", "dashboard", "buffer"]` so `uv sync --frozen` gives a full dev environment; Docker images sync only what they need.
 Only one agent per wave may change `pyproject.toml`/`uv.lock`.
 
 ## 12. Amendments after Epic 1
@@ -145,3 +145,13 @@ Only one agent per wave may change `pyproject.toml`/`uv.lock`.
 - **Clean shutdown.** Connectors and the live pipeline cancel and await every task they start; closing is idempotent, and a venue closing the socket during shutdown is not an error.
 - **Bundled sample.** `dashboard/sample/` is a replay of a 30-minute real capture of BTC-USD and ETH-USD on both venues, compacted with manifests, under 60 MB and QA-clean. The raw capture itself is not published in Phase 1.
 - **Hosting.** The dashboard runs on Streamlit Community Cloud from `dashboard/app.py`, installing `dashboard/requirements.txt`, which is exported from `uv.lock` and checked by a test. The QA site is static HTML built by `scripts/build_qa_site.py` (index, one page per day, `latest.json`) and deployed to GitHub Pages by `.github/workflows/pages.yml`. CI runs `lint`, `types` and `tests` on GitHub-hosted `ubuntu-24.04-arm` runners, using the image's system CPython 3.12.
+
+## 14. Amendments for Phase 2 (v1.1.0)
+
+- **Venue registry.** `tickvault/venues.py` holds one `VenueSpec` per venue (normalizer, connector, optional checksum function and depth). The pipeline's normalizer map, the connector factories, the CLI's `--venues` choices and the book processor's checksum map are all derived from it, so adding a venue is one registry entry plus the venue's own modules.
+- **Third venue: Bitfinex.** Public websocket v2, one connection per symbol (`book` P0 depth 25 + `trades`), `conf` flags for per-connection sequence numbers, CRC32 book checksums and millisecond timestamps. The checksum interleaves the top 25 bid and ask levels and renders numbers the way JavaScript does, so it is computed from a JavaScript-compatible number formatter rather than from the venue text. Bitstamp was not used because its public book feed carries neither sequence numbers nor checksums. Details: `docs/epic-05-third-venue.md`.
+- **Checksum depth per venue.** The processor truncates each checksum-verified book to that venue's depth and passes that many levels to its checksum function (Kraken hashes its top 10 of 25, Bitfinex all 25).
+- **Features table.** `tickvault features` (and the Dagster `features` asset) writes 1-second and 1-minute bars to `<root>/features/resolution=<r>/venue=<v>/date=<d>/part-<symbol>.parquet`: mid, spread, top-5 depth imbalance, trades, volume, signed volume, VWAP, realized volatility. A bar `[start, end)` uses only rows with exchange time strictly before `end`; a lookahead test deletes all data after a cutoff and checks every earlier bar is unchanged. Derived values are float64; `features` is not one of the four normalized tables. DuckDB exposes a `features` view when the tree exists. Details: `docs/epic-04-features.md`.
+- **Optional buffer between ingestion and writing.** With `ingest --buffer HOST:PORT` the ingester publishes every raw envelope (the exact raw-layer bytes) to a Kafka-API topic (`tickvault.raw`, one partition) and `tickvault consume` writes it: raw first, then the unchanged normalizer → processor → Parquet path. Offsets are committed only after the raw writer flushed; delivery is at-least-once, the writer skips records it already wrote, and the raw reader skips exact duplicate lines, so a replay after a writer crash equals a replay of the same messages written once. A restarted writer asks the ingester for fresh snapshots over `tickvault.control`. Without `--buffer`, ingestion is exactly the Phase 1 path. Redpanda runs under the Compose profile `buffer`.
+- **Metrics.** `--metrics-port` serves Prometheus metrics (`tickvault_messages_total`, `rows_total`, `events_total`, `book_live`, `last_message_age_seconds`, `raw_bytes_total`, `normalize_errors_total`, writer `buffer_consumed_total` and `buffer_lag_messages`). The Compose profile `metrics` adds Prometheus and a provisioned Grafana dashboard. Details: `docs/epic-06-buffer-metrics.md`.
+- **Published samples.** `scripts/build_public_sample.py` cuts one symbol and one hour of a day into a size-capped tree with a manifest and `SHA256SUMS`; `tickvault verify --manifest <path|url>` checks a published sample against its manifest (size, SHA-256, Parquet row counts). Publishing itself is Phase 3.
