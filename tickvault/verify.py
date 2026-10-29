@@ -28,12 +28,12 @@ import httpx
 import pyarrow as pa
 
 from tickvault.storage.manifest import (
-    _ManifestDocument,
-    _ManifestEntry,
-    _normalized_files,
-    _row_count,
-    _sha256,
-    _validate_date,
+    ManifestDocument,
+    ManifestEntry,
+    file_sha256,
+    normalized_files,
+    parquet_row_count,
+    validate_date,
 )
 
 _TEMPORARY_DIRECTORY = tempfile.TemporaryDirectory
@@ -122,7 +122,7 @@ def _verify_path(manifest: str) -> VerifyReport:
             report.problems.append(f"{unsafe}: {relative}")
             continue
         _record(report, totals, _check_file(root / relative, relative, entry))
-    for extra_path in _normalized_files(root, document["date"]):
+    for extra_path in normalized_files(root, document["date"]):
         relative = extra_path.relative_to(root).as_posix()
         if relative not in listed:
             report.problems.append(f"unlisted file: {relative}")
@@ -158,7 +158,7 @@ def _verify_url(manifest: str, *, timeout_s: float) -> VerifyReport:
 
 
 def _check_file(
-    path: Path, relative: str, entry: _ManifestEntry
+    path: Path, relative: str, entry: ManifestEntry
 ) -> _FileCheck:
     """Compare one on-disk file with its manifest entry."""
     if not path.is_file():
@@ -167,10 +167,10 @@ def _check_file(
     size = path.stat().st_size
     if size != entry["bytes"]:
         problems.append(f"bytes mismatch: {relative}")
-    if _sha256(path) != entry["sha256"]:
+    if file_sha256(path) != entry["sha256"]:
         problems.append(f"sha256 mismatch: {relative}")
     try:
-        rows = _row_count(path)
+        rows = parquet_row_count(path)
     except (OSError, pa.ArrowException):
         problems.append(f"unreadable file: {relative}")
         return _FileCheck(problems=problems, readable=False)
@@ -237,7 +237,7 @@ def _download_file(
     return None
 
 
-def _load_document(raw: bytes, source: str) -> _ManifestDocument:
+def _load_document(raw: bytes, source: str) -> ManifestDocument:
     """Parse and validate a manifest document, or raise ``ValueError``."""
     try:
         document = json.loads(raw.decode("utf-8"))
@@ -254,14 +254,14 @@ def _load_document(raw: bytes, source: str) -> _ManifestDocument:
         raise ValueError(f"invalid manifest {source}: missing files list")
     if not isinstance(totals, dict):
         raise ValueError(f"invalid manifest {source}: missing totals")
-    _validate_date(date)
+    validate_date(date)
     for entry in files:
         _validate_entry(entry, source)
     for name in ("files", "row_count", "bytes"):
         value = totals.get(name)
         if not isinstance(value, int) or isinstance(value, bool):
             raise ValueError(f"invalid manifest {source}: totals.{name} is not an integer")
-    return cast(_ManifestDocument, document)
+    return cast(ManifestDocument, document)
 
 
 def _validate_entry(entry: object, source: str) -> None:
