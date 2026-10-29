@@ -183,9 +183,7 @@ be undetectable and the third venue would not exercise the anomaly paths the
 project is about. Bitfinex's public v2 websocket offers both on the same
 connection with no authentication, so a gap is detectable per connection and a
 wrong book state is detectable per update batch. Alternative venues were
-rejected for reachability, not merit: OKX left Canada in 2023, and the Gemini
-exchange's name is excluded by the project's name-hygiene rule (H2), so it is
-never considered.
+rejected for reachability, not merit: OKX left Canada in 2023.
 
 **One connection per symbol (A65).** Bitfinex's sequence counter is
 connection-wide, so a single connection carrying BTC-USD and ETH-USD would turn
