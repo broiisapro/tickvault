@@ -760,13 +760,23 @@ _RECORDS_DONE = _EndOfRecords()
 
 
 async def _pump_records(
-    records: AsyncIterator[BufferRecord], queue: asyncio.Queue[BufferRecord | _EndOfRecords]
+    records: AsyncIterator[BufferRecord],
+    queue: asyncio.Queue[BufferRecord | _EndOfRecords],
+    failure: list[BaseException],
 ) -> None:
-    """Forward the buffer's raw records into ``queue``, ending with the sentinel."""
+    """Forward the buffer's raw records into ``queue``, ending with the sentinel.
+
+    A consumer error is remembered in ``failure`` so :func:`run_writer` fails
+    after its cleanup instead of returning clean statistics for a run that
+    never read the topic. With the lazy raw consumer (decision A70, issue
+    #141) the group join happens on the first iteration inside this task, so
+    the error that used to stop ``start()`` surfaces here.
+    """
     try:
         async for record in records:
             await queue.put(record)
-    except Exception:
+    except Exception as exc:
+        failure.append(exc)
         _LOGGER.exception("buffer consumer failed")
     finally:
         await queue.put(_RECORDS_DONE)
@@ -873,6 +883,9 @@ async def run_writer(
     buffer without committing, so the next writer replays that tail. The raw
     writer is built with ``resume=True``, so a restart in the same data root
     continues beside the previous process's files instead of failing on them.
+    An error raised by the buffer's raw iterator (including a failed group join,
+    which happens on its first iteration) is re-raised after that cleanup
+    instead of ending the writer with plausible-looking empty statistics.
 
     ``metrics`` counts consumed records and, at most once per second, sets
     ``tickvault_buffer_lag_messages`` from :meth:`Buffer.end_offset` minus the
@@ -891,7 +904,8 @@ async def run_writer(
     queue: asyncio.Queue[BufferRecord | _EndOfRecords] = asyncio.Queue(
         maxsize=_LIVE_QUEUE_MAXSIZE
     )
-    pumped = asyncio.create_task(_pump_records(buffer.consume_raw(), queue))
+    consume_failure: list[BaseException] = []
+    pumped = asyncio.create_task(_pump_records(buffer.consume_raw(), queue, consume_failure))
     position = _ConsumePosition()
     started = time.monotonic()
     written: set[tuple[str, int]] = set()
@@ -1011,6 +1025,8 @@ async def run_writer(
             await buffer.close()
         except Exception:
             _LOGGER.exception("error closing the buffer")
+    if consume_failure:
+        raise consume_failure[0]
     stats = recorder.stats("writer", stopper.reason if stopper.reason is not None else "completed")
     _LOGGER.info(
         "writer finished: stopped=%s elapsed=%.0fs consumed=%d duplicates=%d "

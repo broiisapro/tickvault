@@ -260,3 +260,31 @@ async def test_lag_returns_to_zero_when_the_writer_is_caught_up(tmp_path: Path) 
     assert [message.ingest_seq for message in iter_raw(tmp_path / "data")] == list(
         range(len(lines))
     )
+
+
+class _FailingBuffer(_ScriptedBuffer):
+    """A buffer whose raw iterator fails before delivering a record."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.failure = RuntimeError("group join failed")
+
+    def consume_raw(self) -> AsyncIterator[BufferRecord]:
+        return self._failing_stream()
+
+    async def _failing_stream(self) -> AsyncIterator[BufferRecord]:
+        # The Kafka raw consumer joins its group on the first iteration, so a
+        # failed join surfaces here rather than in start().
+        raise self.failure
+        yield b""  # pragma: no cover - unreachable, keeps this a generator
+
+
+async def test_writer_raises_when_the_raw_consumer_fails(tmp_path: Path) -> None:
+    """A consumer failure must not look like a clean run over an empty topic."""
+    buffer = _FailingBuffer()
+
+    with pytest.raises(RuntimeError, match="group join failed"):
+        await asyncio.wait_for(run_writer(buffer, tmp_path / "data"), timeout=20)
+
+    assert buffer.closed
+    assert not list((tmp_path / "data").rglob("*.parquet"))
