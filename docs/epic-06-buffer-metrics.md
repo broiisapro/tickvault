@@ -166,9 +166,9 @@ entry point.
 
 The writer's offsets are committed after the flush; a restart resumes from the
 committed offset and skips only what it already wrote. Its process counters
-(`tickvault_buffer_consumed_total` and the rest) start at zero again, which is
-why the smoke script's post-restart reading is smaller than the first
-process's.
+(`tickvault_buffer_consumed_total` and the rest) start at zero again, so the
+smoke script's post-restart reading (8316) is the new process's own count, not
+a run total.
 
 ### Metrics
 
@@ -230,7 +230,7 @@ ingester declares the broker and its init service as `depends_on` with
 `required: false`, so with the profile off those dependencies simply do not
 apply and the Phase 1 stack starts unchanged.
 
-`redpanda-init` is a one-shot container built from the same Redpanda image. It
+`redpanda-init` is a one-shot container running the same Redpanda image. It
 waits for the broker's healthcheck, raises the two size limits, creates both
 topics and exits; `depends_on: service_completed_successfully` makes the
 ingester and writer wait for it, so the first record is never published into a
