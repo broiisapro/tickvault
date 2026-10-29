@@ -1,4 +1,4 @@
-"""Package metadata checks for the 1.0.0 public release (issue #82).
+"""Package metadata checks for the public releases (issues #82 and #151).
 
 These read the metadata installed by ``uv sync``, so they fail if the project
 version or the MIT license declaration drifts from the committed ``LICENSE``.
@@ -14,8 +14,8 @@ import tickvault
 _ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_version_is_1_0_0_everywhere() -> None:
-    assert tickvault.__version__ == "1.0.0"
+def test_version_is_1_1_0_everywhere() -> None:
+    assert tickvault.__version__ == "1.1.0"
     assert metadata.version("tickvault") == tickvault.__version__
 
 
